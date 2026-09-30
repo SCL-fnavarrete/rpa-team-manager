@@ -20,7 +20,8 @@ import {
   BarChartOutlined,
   MenuOutlined,
   TeamOutlined,
-  SearchOutlined
+  SearchOutlined,
+  CalculatorOutlined
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
@@ -35,6 +36,7 @@ const { Text } = Typography;
 const pageTitles: Array<{ match: (path: string) => boolean; title: string; eyebrow: string }> = [
   { match: (path) => path === '/dashboard', title: 'Inicio', eyebrow: 'RESUMEN' },
   { match: (path) => path === '/projects', title: 'Portafolio', eyebrow: 'PROYECTOS' },
+  { match: (path) => path === '/cotizador', title: 'Cotizador y Levantamiento RPA', eyebrow: 'ESTIMACIÓN Y LEVANTAMIENTO' },
   { match: (path) => path === '/clients', title: 'Clientes y comerciales', eyebrow: 'CICLO COMERCIAL' },
   { match: (path) => path.startsWith('/projects/'), title: 'Ficha 360° del proyecto', eyebrow: 'PROYECTOS' },
   { match: (path) => path.startsWith('/pmo'), title: 'Centro PMO', eyebrow: 'CONTROL' },
@@ -137,6 +139,7 @@ export const AppLayout: React.FC = () => {
       { type: 'group', label: 'ESPACIO DE TRABAJO', children: [
         { key: '/dashboard', icon: <DashboardOutlined />, label: 'Inicio' },
         { key: '/projects', icon: <ProjectOutlined />, label: 'Portafolio' },
+        { key: '/cotizador', icon: <CalculatorOutlined />, label: 'Cotizador RPA' },
         { key: '/tasks', icon: <CheckSquareOutlined />, label: 'Tareas' },
         { key: '/time', icon: <ClockCircleOutlined />, label: 'Registro de tiempo' }
       ] },
@@ -151,6 +154,7 @@ export const AppLayout: React.FC = () => {
       main[0] = { type: 'group', label: 'ESPACIO DE TRABAJO', children: [
         { key: '/dashboard', icon: <DashboardOutlined />, label: 'Inicio' },
         { key: '/projects', icon: <ProjectOutlined />, label: 'Portafolio' },
+        { key: '/cotizador', icon: <CalculatorOutlined />, label: 'Cotizador RPA' },
         { key: '/clients', icon: <TeamOutlined />, label: 'Clientes y comerciales' },
         { key: '/tasks', icon: <CheckSquareOutlined />, label: 'Tareas' },
         { key: '/time', icon: <ClockCircleOutlined />, label: 'Registro de tiempo' }

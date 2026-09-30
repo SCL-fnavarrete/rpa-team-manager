@@ -24,6 +24,7 @@ import BillingPage from '@/pages/billing/BillingPage';
 import ProfilePage from '@/pages/profile/ProfilePage';
 import TeamManagementPage from '@/pages/admin/TeamManagementPage';
 import PriorityMatrixPage from '@/pages/priorities/PriorityMatrixPage';
+import { ScopingPage } from '@/pages/scoping/ScopingPage';
 
 // React Query client
 const queryClient = new QueryClient({
@@ -55,9 +56,10 @@ function App() {
               <Route index element={<Navigate to="/dashboard" replace />} />
               <Route path="dashboard" element={<DashboardPage />} />
               
-              {/* Projects */}
+              {/* Projects & Scoping */}
               <Route path="projects" element={<ProjectsPage />} />
               <Route path="projects/:id" element={<ProjectDetailPage />} />
+              <Route path="cotizador" element={<ScopingPage />} />
               <Route path="clients" element={
                 <ProtectedRoute requiredRoles={['team_lead', 'rpa_operations']}>
                   <ClientsPage />

@@ -2129,5 +2129,85 @@ export const migrations: Migration[] = [
         });
       }
     }
+  },
+  {
+    version: 47,
+    description: 'Cotizador de RPA, protocolo de levantamiento de 15 minutos, scoring de viabilidad y cubicación de esfuerzo',
+    up: [
+      `CREATE TABLE IF NOT EXISTS scoping_quotations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code VARCHAR(50) UNIQUE NOT NULL,
+        client_name VARCHAR(150) NOT NULL,
+        client_contact VARCHAR(150),
+        client_email VARCHAR(150),
+        process_name VARCHAR(200) NOT NULL,
+        business_unit VARCHAR(100),
+        process_archetype VARCHAR(50) NOT NULL DEFAULT 'custom',
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+        data_input_type VARCHAR(40) NOT NULL,
+        rule_based_level VARCHAR(40) NOT NULL,
+        process_stability VARCHAR(40) NOT NULL,
+        application_stability VARCHAR(40) NOT NULL,
+        frequency VARCHAR(30) NOT NULL,
+        volume_per_frequency INTEGER NOT NULL DEFAULT 1,
+        aht_minutes DECIMAL(8,2) NOT NULL DEFAULT 10,
+        current_ftes DECIMAL(6,2) DEFAULT 1,
+        error_rate_pct DECIMAL(5,2) DEFAULT 5,
+        peak_period VARCHAR(40) DEFAULT 'regular_peak',
+        process_steps_count VARCHAR(30) NOT NULL,
+        decision_complexity VARCHAR(30) NOT NULL,
+        applications_count VARCHAR(30) NOT NULL,
+        applications_detail TEXT,
+        uses_vdi BOOLEAN NOT NULL DEFAULT 0,
+        requires_ocr BOOLEAN NOT NULL DEFAULT 0,
+        structured_data_pct VARCHAR(30) NOT NULL,
+        exception_rate_pct DECIMAL(5,2) DEFAULT 3,
+
+        viability_status VARCHAR(30) NOT NULL,
+        viability_score DECIMAL(4,2) NOT NULL,
+        complexity_score DECIMAL(4,2) NOT NULL,
+        difficulty_score DECIMAL(4,2) NOT NULL,
+        effort_level VARCHAR(20) NOT NULL,
+        benefit_level VARCHAR(20) NOT NULL,
+        annual_manual_hours INTEGER NOT NULL,
+        hours_saved_annual INTEGER NOT NULL,
+        ftes_released DECIMAL(6,2) NOT NULL,
+        error_reduction_pct INTEGER NOT NULL,
+        aht_reduction_pct INTEGER NOT NULL,
+
+        estimated_weeks INTEGER NOT NULL DEFAULT 6,
+        hours_pm INTEGER NOT NULL DEFAULT 24,
+        hours_consultant INTEGER NOT NULL DEFAULT 54,
+        hours_developer INTEGER NOT NULL DEFAULT 140,
+        hours_advisor INTEGER NOT NULL DEFAULT 18,
+        total_hours INTEGER NOT NULL DEFAULT 236,
+
+        currency VARCHAR(5) NOT NULL DEFAULT 'CLP',
+        hourly_labor_cost DECIMAL(12,2) NOT NULL DEFAULT 14000,
+        target_hourly_rate DECIMAL(12,2) NOT NULL DEFAULT 36000,
+        internal_cost_rate DECIMAL(12,2) NOT NULL DEFAULT 18000,
+        project_internal_cost DECIMAL(14,2) NOT NULL,
+        proposed_price DECIMAL(14,2) NOT NULL,
+        projected_margin_pct DECIMAL(5,2) NOT NULL,
+        client_annual_manual_cost DECIMAL(14,2) NOT NULL,
+        client_annual_savings DECIMAL(14,2) NOT NULL,
+        payback_months DECIMAL(6,1) NOT NULL,
+        roi_first_year_pct DECIMAL(6,1) NOT NULL,
+
+        assumptions TEXT,
+        exclusions TEXT,
+        notes TEXT,
+        status VARCHAR(30) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'sent_to_client', 'approved', 'rejected', 'converted_to_project')),
+        converted_project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_scoping_client ON scoping_quotations(client_name)`,
+      `CREATE INDEX IF NOT EXISTS idx_scoping_status ON scoping_quotations(status)`,
+      `CREATE INDEX IF NOT EXISTS idx_scoping_archetype ON scoping_quotations(process_archetype)`,
+      `CREATE INDEX IF NOT EXISTS idx_scoping_created ON scoping_quotations(created_at DESC)`
+    ]
   }
 ];
+

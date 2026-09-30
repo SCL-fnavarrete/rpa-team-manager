@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Col, DatePicker, Empty, Input, Row, Select, Space, Typography, App } from 'antd';
-import { PlusOutlined, SearchOutlined, ProjectOutlined, ExclamationCircleOutlined, FileTextOutlined, FilterOutlined } from '@ant-design/icons';
+import { PlusOutlined, SearchOutlined, ProjectOutlined, ExclamationCircleOutlined, FileTextOutlined, FilterOutlined, CalculatorOutlined } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import { ProjectCard } from '@/components/projects/ProjectCard';
 import { CreateProjectModal } from '@/components/projects/CreateProjectModal';
@@ -111,7 +111,7 @@ export const ProjectsPage: React.FC = () => {
     <main className="projects-page">
       <section className="projects-heading">
         <div><Text className="section-kicker">REPOSITORIO Y SEGUIMIENTO</Text><Title level={1}><ProjectOutlined /> Portafolio de proyectos</Title><Text type="secondary">Busca y revisa clientes, responsables, etapas, avance y fechas de cada iniciativa.</Text></div>
-        {canCreateProject && <Space wrap className="projects-heading-actions"><Button icon={<FileTextOutlined />} onClick={() => setQuoteUploadModalVisible(true)}>Crear desde cotización</Button><Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingProject(null); setWizardVisible(true); }}>Nuevo proyecto</Button></Space>}
+        {canCreateProject && <Space wrap className="projects-heading-actions"><Button icon={<CalculatorOutlined />} onClick={() => navigate('/cotizador')}>Cotizador & Levantamiento</Button><Button icon={<FileTextOutlined />} onClick={() => setQuoteUploadModalVisible(true)}>Crear desde cotización</Button><Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingProject(null); setWizardVisible(true); }}>Nuevo proyecto</Button></Space>}
       </section>
       <section className="projects-toolbar" aria-label="Buscar y filtrar proyectos">
         <Row gutter={[10, 10]} align="middle">
