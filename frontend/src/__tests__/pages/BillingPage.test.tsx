@@ -26,7 +26,8 @@ vi.mock('../../services/api', () => ({
       summary: { total_pending_clp: 0, total_billable_clp: 500000, total_invoiced_clp: 0, total_paid_clp: 200000, total_overdue_clp: 0 }
     }),
     getPaymentMilestones: vi.fn().mockResolvedValue([]),
-    getInvoices: vi.fn().mockResolvedValue([])
+    getInvoices: vi.fn().mockResolvedValue([]),
+    getCostCenters: vi.fn().mockResolvedValue([])
   }
 }));
 

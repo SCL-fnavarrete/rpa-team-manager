@@ -11,6 +11,7 @@ vi.mock('@/services/api', () => ({
     post: vi.fn(),
     getPaymentMilestones: vi.fn().mockResolvedValue([]),
     getInvoices: vi.fn().mockResolvedValue([]),
+    getProjectCostCenters: vi.fn().mockResolvedValue({ allocations: [] }),
     getTeamCapacity: vi.fn(),
     getProjectCapacity: vi.fn(),
     saveProjectCapacity: vi.fn(),
