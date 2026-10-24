@@ -6,6 +6,7 @@ import { ActivityLogEntry } from '../types/activity';
 import { NotificationItem } from '../types/notification';
 import { TeamCostsResponse } from '@/types/teamCosts';
 import { CostCenter, ProjectCostCenterAllocation, CostCenterBillingSummaryRow } from '@/types/costCenter';
+import { PortfolioFilters, PortfolioResult } from '@/types/portfolio';
 
 interface RequestCache {
   [key: string]: {
@@ -1050,6 +1051,12 @@ class ApiService {
 
   async getPMOProjectGantt(projectId: number): Promise<any> {
     return this.makeRequest<any>('get', `/pmo/projects/${projectId}/gantt`, undefined, undefined, true);
+  }
+
+  // Cartera de proyectos (solo team_lead): el backend responde { data: PortfolioResult }
+  async getPortfolio(filters?: PortfolioFilters): Promise<PortfolioResult> {
+    const response = await this.api.get('/portfolio', { params: filters });
+    return response.data.data;
   }
 
   async createMilestone(milestoneData: any): Promise<any> {

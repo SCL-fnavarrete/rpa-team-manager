@@ -21,7 +21,8 @@ import {
   MenuOutlined,
   TeamOutlined,
   SearchOutlined,
-  CalculatorOutlined
+  CalculatorOutlined,
+  FolderOpenOutlined
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
@@ -40,6 +41,7 @@ const pageTitles: Array<{ match: (path: string) => boolean; title: string; eyebr
   { match: (path) => path === '/clients', title: 'Clientes y comerciales', eyebrow: 'CICLO COMERCIAL' },
   { match: (path) => path.startsWith('/projects/'), title: 'Ficha 360° del proyecto', eyebrow: 'PROYECTOS' },
   { match: (path) => path.startsWith('/pmo'), title: 'Centro PMO', eyebrow: 'CONTROL' },
+  { match: (path) => path === '/portfolio', title: 'Cartera de proyectos', eyebrow: 'CONTROL' },
   { match: (path) => path === '/billing', title: 'Finanzas', eyebrow: 'CONTROL' },
   { match: (path) => path === '/tasks', title: 'Tareas', eyebrow: 'EJECUCIÓN' },
   { match: (path) => path === '/time', title: 'Registro de tiempo', eyebrow: 'EJECUCIÓN' },
@@ -164,6 +166,7 @@ export const AppLayout: React.FC = () => {
     if (roleCanSeePMO) {
       main.splice(1, 0, { type: 'group', label: 'CONTROL', children: [
         { key: '/pmo', icon: <FundOutlined />, label: 'Centro PMO' },
+        ...(user?.role === 'team_lead' ? [{ key: '/portfolio', icon: <FolderOpenOutlined />, label: 'Cartera de proyectos' }] : []),
         { key: '/billing', icon: <DollarOutlined />, label: 'Finanzas' }
       ] });
     }
