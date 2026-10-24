@@ -4,7 +4,7 @@
 
 **Goal:** Corregir los defectos críticos e importantes que el recorrido en navegador encontró en el Cotizador RPA, para que lo guardado coincida con lo mostrado, editar no destruya datos, "Convertir en Proyecto" funcione y el módulo respete los permisos de costos/márgenes.
 
-**Architecture:** Tres tareas secuenciales: (A) backend — validación, permisos con saneamiento de costos internos, semántica de actualización con horas manuales persistidas, conversión a proyecto transaccional, tarifas por moneda; (B) frontend — formulario/estado del wizard (guardar y editar sin pérdida, monedas, errores visibles); (C) frontend — propuesta, impresión, textos, tema y visibilidad por rol.
+**Architecture:** Tres tareas secuenciales: (Task 1) backend — validación, permisos con saneamiento de costos internos, semántica de actualización con horas manuales persistidas, conversión a proyecto transaccional, tarifas por moneda; (Task 2) frontend — formulario/estado del wizard (guardar y editar sin pérdida, monedas, errores visibles); (Task 3) frontend — propuesta, impresión, textos, tema y visibilidad por rol.
 
 **Tech Stack:** Node/Express/SQLite3/Jest (backend), React 18 + Ant Design v5 + Vitest (frontend).
 
@@ -16,22 +16,22 @@
 - Roles reales: `team_lead`, `rpa_developer`, `rpa_operations`, `it_support`, `billing`. Crear proyectos exige `team_lead` o `rpa_operations` (igual que `POST /api/projects`).
 - Mensajes de error y textos de UI en español; nada de errores SQL crudos al usuario.
 - Frontend: `docs/UI_THEME_SPEC.md` (cero colores hex quemados, cero `bodyStyle`, `theme.useToken()`, Día y Noche), números con `frontend/src/utils/numberFormat.ts`. `npm run check:theme` debe seguir en 0 violaciones.
-- El motor de cálculo NO se rediseña: los 3 niveles de horas (236/492/666) son el comportamiento aprobado (I1 se corrige solo en los textos, ver Task C). `backend/src/__tests__/services/scopingCalculationEngine.test.ts` debe seguir pasando sin cambios.
+- El motor de cálculo NO se rediseña: los 3 niveles de horas (236/492/666) son el comportamiento aprobado (I1 se corrige solo en los textos, ver Task 3). `backend/src/__tests__/services/scopingCalculationEngine.test.ts` debe seguir pasando sin cambios.
 - Migraciones: nueva versión 48 (la 47 ya está aplicada y commiteada); nunca editar migraciones anteriores.
 - Backend: los 563+ tests, `tsc --noEmit` y `npm run lint` (0 errores) en verde antes de cada commit. Frontend: tests afectados, `tsc --noEmit`, `check:theme` y lint.
 - Commits en español, estilo `fix(cotizador): ...`, con la línea final `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`.
 
 ## Review Focus
 
-1. Guardar un levantamiento sin visitar los pasos 2-4 guarda exactamente lo que el panel mostraba (C1) — test de payload en Task B.
-2. Editar → Guardar sin cambios deja idénticos arquetipo, OCR/VDI, HH, semanas y precio (C2) — tests en Tasks A (API) y B (UI).
-3. Fallo de conversión a proyecto no deja proyecto/tablero/columnas huérfanos (C3) — test de rollback en Task A.
-4. Payload inválido (vacío, `null`, texto en numéricos, negativos, moneda "EUR") → 400 en español, nunca 200 con nulos ni 500 con texto interno (I5, I12) — Task A.
-5. `rpa_developer`/`it_support`/`billing`: no ven costo interno ni margen, no borran ni convierten cotizaciones ajenas (I10) — Task A y Task C.
+1. Guardar un levantamiento sin visitar los pasos 2-4 guarda exactamente lo que el panel mostraba (C1) — test de payload en Task 2.
+2. Editar → Guardar sin cambios deja idénticos arquetipo, OCR/VDI, HH, semanas y precio (C2) — tests en Tasks 1 (API) y 2 (UI).
+3. Fallo de conversión a proyecto no deja proyecto/tablero/columnas huérfanos (C3) — test de rollback en Task 1.
+4. Payload inválido (vacío, `null`, texto en numéricos, negativos, moneda "EUR") → 400 en español, nunca 200 con nulos ni 500 con texto interno (I5, I12) — Task 1.
+5. `rpa_developer`/`it_support`/`billing`: no ven costo interno ni margen, no borran ni convierten cotizaciones ajenas (I10) — Task 1 y Task 3.
 
 ---
 
-### Task A: Backend — validación, permisos, actualización fiel y conversión transaccional
+### Task 1: Backend — validación, permisos, actualización fiel y conversión transaccional
 
 **Files:**
 - Modify: `backend/src/database/migrationList.ts` (migración 48: columna `custom_hours_json TEXT` en `scoping_quotations`, NULL = sin calibración manual)
@@ -43,7 +43,7 @@
 - Produces: respuesta de `GET /api/scopings`, `GET /api/scopings/:id`, `POST /calculate`, `POST /`, `PUT /:id` incluye `custom_hours: { lp?, crpa?, ar?, adv?, weeks? } | null` (parseado desde `custom_hours_json`) para que el frontend restaure la calibración manual. Para roles distintos de `team_lead` se omiten los campos de costo interno/margen listados en Global Constraints.
 - Produces: `PUT /api/scopings/:id` admite cuerpo parcial: se fusiona sobre el registro existente y se recalcula con las entradas fusionadas; `custom_hours` ausente = conservar el guardado, `custom_hours: null` = limpiar, objeto = reemplazar. `process_archetype` ausente = conservar.
 - Produces: `POST /:id/convert-to-project` → `{ data: { project_id, message } }`; 409 con mensaje en español si ya estaba convertida o si `viability_status` indica no viable; 403 si el rol no es `team_lead`/`rpa_operations`.
-- Consumes (Task B/C): los campos anteriores.
+- Consumes (Task 2/3): los campos anteriores.
 
 - [ ] **Step 1: Escribir tests que fallan**
   - Migración 48: `agrega custom_hours_json nullable y conserva filas existentes con NULL`.
@@ -65,14 +65,14 @@
 
 ---
 
-### Task B: Frontend — wizard fiel, edición sin pérdida y errores visibles
+### Task 2: Frontend — wizard fiel, edición sin pérdida y errores visibles
 
 **Files:**
 - Modify: `frontend/src/pages/scoping/ScopingPage.tsx`, `frontend/src/components/scoping/DiscoveryWizard.tsx`, `frontend/src/components/scoping/LiveScoringSidebar.tsx`, `frontend/src/components/scoping/MeetingTimerHeader.tsx`, `frontend/src/services/scopingService.ts`, `frontend/src/types/scoping.ts` (agregar `custom_hours` y manejo de campos de costo opcionales)
 - Test: `frontend/src/__tests__/pages/ScopingPage.test.tsx` (crear), mismo molde que `PortfolioPage.test.tsx`/otros tests de páginas, con `scopingService` mockeado
 
 **Interfaces:**
-- Consumes: contrato de Task A (`custom_hours`, PUT parcial, 400 con `{ error }` en español).
+- Consumes: contrato de Task 1 (`custom_hours`, PUT parcial, 400 con `{ error }` en español).
 - Produces: `ScopingPage` que siempre envía el conjunto completo de entradas (`{ ...DEFAULT_INPUTS, ...form.getFieldsValue(true) }`) tanto a `/calculate` como a create/update, sin convertir `undefined` en `false`.
 
 - [ ] **Step 1: Escribir tests que fallan** (`ScopingPage.test.tsx`):
@@ -97,14 +97,14 @@
 
 ---
 
-### Task C: Frontend — propuesta, impresión, textos, tema y visibilidad por rol
+### Task 3: Frontend — propuesta, impresión, textos, tema y visibilidad por rol
 
 **Files:**
 - Modify: `frontend/src/components/scoping/TechnicalEconomicProposalModal.tsx`, `frontend/src/components/scoping/LiveScoringSidebar.tsx`, `frontend/src/components/scoping/ScopingListTable.tsx`, `frontend/src/components/scoping/DiscoveryWizard.tsx` (etiquetas de pestañas y textos de multiplicadores), `frontend/src/pages/scoping/ScopingPage.tsx` (solo lo estrictamente necesario: código/fecha de la propuesta, visibilidad por rol, botón convertir)
-- Test: `frontend/src/__tests__/components/TechnicalEconomicProposalModal.test.tsx` (crear) y ampliar `ScopingPage.test.tsx` de Task B si hace falta
+- Test: `frontend/src/__tests__/components/TechnicalEconomicProposalModal.test.tsx` (crear) y ampliar `ScopingPage.test.tsx` de Task 2 si hace falta
 
 **Interfaces:**
-- Consumes: `ScopingQuotation`/resultado de cálculo con campos de costo interno opcionales (Task A los omite para no `team_lead`); `useAuthStore` para el rol (patrón ya usado en `AppLayout`).
+- Consumes: `ScopingQuotation`/resultado de cálculo con campos de costo interno opcionales (Task 1 los omite para no `team_lead`); `useAuthStore` para el rol (patrón ya usado en `AppLayout`).
 
 - [ ] **Step 1: Escribir tests que fallan**:
   - I6: `proceso no viable muestra la leyenda en tono de error, oculta precio y ROI de la propuesta y deshabilita "Convertir en Proyecto"`.
@@ -127,6 +127,6 @@
 
 ## Self-Review
 
-- **Cobertura:** C1/C2/I8/I2/I3/I4/I5/M3/M8 → Task B; C3/I10/I12/M4/M9 → Task A; I6/I7/I9/I11/I1/M1/M2/M10 y visibilidad por rol → Task C; I5/I12 backend → Task A.
+- **Cobertura:** C1/C2/I8/I2/I3/I4/I5/M3/M8 → Task 2; C3/I10/I12/M4/M9 → Task 1; I6/I7/I9/I11/I1/M1/M2/M10 y visibilidad por rol → Task 3; I5/I12 backend → Task 1.
 - **Fuera de alcance a propósito:** rediseño del motor para que volumen/pasos modifiquen horas dentro de un nivel (I1, requiere decisión de producto), M5/M6/M7 (ajustes menores de layout; M7 es del layout global), asignar estados "Enviada/Aprobada/Rechazada" desde la UI, límite de intentos de login en desarrollo.
-- **Consistencia:** `custom_hours` (objeto o null) definido en Task A y consumido en B; campos de costo interno opcionales definidos en Task A y consumidos en C.
+- **Consistencia:** `custom_hours` (objeto o null) definido en Task 1 y consumido en Task 2; campos de costo interno opcionales definidos en Task 1 y consumidos en Task 3.
