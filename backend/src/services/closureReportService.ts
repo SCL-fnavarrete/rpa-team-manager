@@ -19,7 +19,7 @@ export interface ClosureReport {
     quoted: { amount_clp: number; hours: number; estimated_cost_clp: number; margin_percent: number | null; version: number | null };
     actual: {
         sale_price: number; real_cost: number; real_profit: number; real_margin_percentage: number;
-        approved_hours: number; planned_hours: number; variance_impact: number;
+        approved_hours: number; real_hours_source: 'approved' | 'projected'; planned_hours: number; variance_impact: number;
     };
     team: { user_name: string; budgeted_hours: number; actual_hours: number }[];
     milestones: { name: string; amount: number; currency: string; status: string; planned_date: string | null }[];
@@ -73,13 +73,14 @@ export class ClosureReportService {
                 real_profit: financials.real_profit,
                 real_margin_percentage: financials.real_margin_percentage,
                 approved_hours: financials.approved_hours,
+                real_hours_source: financials.real_hours_source,
                 planned_hours: financials.planned_hours,
                 variance_impact: financials.variance_impact
             },
             team: await this.getTeam(projectId),
             milestones: await db.query(
                 `SELECT name, amount, currency, status, planned_date FROM payment_milestones
-                 WHERE project_id = ? ORDER BY planned_date ASC, sort_order ASC, id ASC`,
+                 WHERE project_id = ? ORDER BY planned_date IS NULL, planned_date ASC, sort_order ASC, id ASC`,
                 [projectId]
             ),
             generated_at: new Date().toISOString()

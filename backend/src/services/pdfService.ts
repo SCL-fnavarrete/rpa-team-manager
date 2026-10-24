@@ -1,5 +1,5 @@
 import PDFDocument from 'pdfkit';
-import { ClosureReport } from './closureReportService';
+import type { ClosureReport } from './closureReportService';
 
 export interface PaymentStatementMilestone {
     name: string;
@@ -75,6 +75,7 @@ export function generatePaymentStatement(data: PaymentStatementData): Promise<Bu
 }
 
 const PROJECT_STATUS_LABEL: Record<string, string> = {
+    planning: 'Planificación',
     active: 'Activo',
     on_hold: 'En pausa',
     completed: 'Completado',
@@ -87,6 +88,16 @@ const ROW_HEIGHT = 16;
 const formatNumber = (value: number): string => value.toLocaleString('es-CL', { maximumFractionDigits: 2 });
 const formatSigned = (value: number, format: (n: number) => string): string => `${value > 0 ? '+' : value < 0 ? '-' : ''}${format(Math.abs(value))}`;
 const formatPercent = (value: number): string => `${formatNumber(value)} %`;
+
+const chileDateFormat = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Santiago', year: 'numeric', month: '2-digit', day: '2-digit' });
+
+/** Fecha AAAA-MM-DD en hora de Chile de un instante ISO o de un timestamp UTC de SQLite ("AAAA-MM-DD HH:MM:SS"). */
+function formatChileDate(timestamp: string): string {
+    const instant = new Date(timestamp.includes('T') ? timestamp : `${timestamp.replace(' ', 'T')}Z`);
+    if (Number.isNaN(instant.getTime())) return timestamp.slice(0, 10);
+    const parts = Object.fromEntries(chileDateFormat.formatToParts(instant).map(part => [part.type, part.value]));
+    return `${parts.year}-${parts.month}-${parts.day}`;
+}
 
 type TableColumn = { width: number; align?: 'left' | 'right' };
 
@@ -102,7 +113,8 @@ function drawRow(doc: PDFKit.PDFDocument, columns: TableColumn[], cells: string[
     let x = left;
     doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10);
     columns.forEach((column, index) => {
-        doc.text(cells[index], x, top, { width: column.width - 6, align: column.align ?? 'left', lineBreak: false, ellipsis: true });
+        // pdfkit solo aplica la elipsis cuando hay height: sin él el texto largo se parte en renglones y pisa la fila siguiente
+        doc.text(cells[index], x, top, { width: column.width - 6, height: ROW_HEIGHT - 4, align: column.align ?? 'left', ellipsis: true });
         x += column.width;
     });
     doc.x = left;
@@ -136,14 +148,16 @@ export function generateClosureReport(report: ClosureReport): Promise<Buffer> {
         doc.text(`Proyecto: ${project.name}`);
         doc.text(`Cliente: ${project.client_name ?? 'N/A'}`);
         doc.text(`Comercial: ${project.sales_rep_name ?? 'N/A'}`);
-        doc.text(`Generado: ${report.generated_at.slice(0, 10)}`);
+        doc.text(`Generado: ${formatChileDate(report.generated_at)}`);
 
         drawSection(doc, 'Resumen');
         doc.fontSize(11);
         doc.text(`Estado: ${PROJECT_STATUS_LABEL[project.status] || project.status}`);
-        doc.text(`Inicio: ${project.start_date ?? NO_DATA} — Término: ${project.end_date ?? NO_DATA}`);
-        doc.text(`Entrega aceptada: ${project.delivery_accepted_at?.slice(0, 10) ?? 'Pendiente'}`);
-        doc.text(`Cierre financiero: ${project.financial_closed_at?.slice(0, 10) ?? 'Pendiente'}`);
+        doc.text(project.start_date || project.end_date
+            ? `Inicio: ${project.start_date ?? NO_DATA} — Término: ${project.end_date ?? NO_DATA}`
+            : 'Fechas: sin registrar');
+        doc.text(`Entrega aceptada: ${project.delivery_accepted_at ? formatChileDate(project.delivery_accepted_at) : 'Pendiente'}`);
+        doc.text(`Cierre financiero: ${project.financial_closed_at ? formatChileDate(project.financial_closed_at) : 'Pendiente'}`);
         doc.text(`Listo para cerrar finanzas: ${report.can_close_financials ? 'Sí' : 'No'}`);
 
         drawSection(doc, 'Cotizado vs Real');
@@ -166,6 +180,7 @@ export function generateClosureReport(report: ClosureReport): Promise<Buffer> {
         comparisonRow('Margen', quoted.margin_percent, actual.real_margin_percentage, formatPercent, n => `${formatNumber(n)} pp`);
         doc.moveDown(0.5);
         doc.font('Helvetica').fontSize(10);
+        if (actual.real_hours_source === 'projected') doc.text('Real estimado: no hay horas aprobadas aún', left, doc.y);
         doc.text(hasQuote ? `Cotización aprobada: versión ${quoted.version}` : 'Sin cotización aprobada registrada.', left, doc.y);
         doc.text(`Utilidad real: ${formatCLP(actual.real_profit)}`);
         doc.text(`Horas planificadas: ${formatNumber(actual.planned_hours)}`);

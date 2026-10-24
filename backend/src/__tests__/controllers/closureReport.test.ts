@@ -340,11 +340,11 @@ describe('Informe de cierre - servicio, endpoints y PDF (SQLite real)', () => {
         expect(report.actual).toEqual({
             sale_price: fin.sale_price, real_cost: fin.real_cost, real_profit: fin.real_profit,
             real_margin_percentage: fin.real_margin_percentage, approved_hours: fin.approved_hours,
-            planned_hours: fin.planned_hours, variance_impact: fin.variance_impact
+            real_hours_source: fin.real_hours_source, planned_hours: fin.planned_hours, variance_impact: fin.variance_impact
         });
         expect(report.actual).toMatchObject({
             sale_price: 1000000, real_cost: 200000, real_profit: 800000, real_margin_percentage: 80,
-            approved_hours: 25, planned_hours: 100
+            approved_hours: 25, real_hours_source: 'approved', planned_hours: 100
         });
         expect(report.team).toEqual([
             { user_name: 'DEV', budgeted_hours: 40, actual_hours: 25 },
@@ -367,8 +367,9 @@ describe('Informe de cierre - servicio, endpoints y PDF (SQLite real)', () => {
         expect(report.team.reduce((acc, member) => acc + member.actual_hours, 0)).toBe(report.actual.approved_hours);
     });
 
-    it('lista los hitos de pago con sus importes originales ordenados por fecha', async () => {
+    it('lista los hitos de pago con sus importes originales ordenados por fecha y los sin fecha al final', async () => {
         const projectId = await addProject();
+        await addMilestone(projectId, 'Sin fecha', 'pending', null);
         await addMilestone(projectId, 'Segundo', 'pending', '2026-12-01');
         await addMilestone(projectId, 'Primero', 'paid', '2026-06-01');
 
@@ -376,9 +377,20 @@ describe('Informe de cierre - servicio, endpoints y PDF (SQLite real)', () => {
 
         expect(report.milestones).toEqual([
             { name: 'Primero', amount: 500000, currency: 'CLP', status: 'paid', planned_date: '2026-06-01' },
-            { name: 'Segundo', amount: 500000, currency: 'CLP', status: 'pending', planned_date: '2026-12-01' }
+            { name: 'Segundo', amount: 500000, currency: 'CLP', status: 'pending', planned_date: '2026-12-01' },
+            { name: 'Sin fecha', amount: 500000, currency: 'CLP', status: 'pending', planned_date: null }
         ]);
         expect(new Date(report.generated_at).toString()).not.toBe('Invalid Date');
+    });
+
+    it('actual.real_hours_source avisa si el real viene de horas aprobadas o de una proyección', async () => {
+        const sinHoras = await addProject({ name: 'Sin horas aprobadas', salePrice: 1000000, budgetedCost: 600000, budgetedHours: 100 });
+        await addTimeEntry(sinHoras, users.dev, 8, 'submitted');
+        const conHoras = await addProject({ name: 'Con horas aprobadas', salePrice: 1000000, budgetedCost: 600000, budgetedHours: 100 });
+        await addTimeEntry(conHoras, users.dev, 8, 'approved');
+
+        expect((await closureReportService.getReport(sinHoras))!.actual).toMatchObject({ real_hours_source: 'projected', approved_hours: 0 });
+        expect((await closureReportService.getReport(conHoras))!.actual).toMatchObject({ real_hours_source: 'approved', approved_hours: 8 });
     });
 
     it('proyecto sin horas, cotización ni facturas devuelve secciones vacías sin NaN', async () => {
