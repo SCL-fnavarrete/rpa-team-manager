@@ -1357,12 +1357,13 @@ export class ProjectController {
             await db.beginTransaction();
 
             try {
-                // 1. Create project
+                // 1. Create project (nace en ejecución: la cotización ya está aprobada, igual que approveByClient)
                 const projectResult = await db.run(`
                     INSERT INTO projects (
                         name, description, status, priority,
-                        start_date, end_date, created_by
-                    ) VALUES (?, ?, 'active', ?, ?, ?, ?)
+                        start_date, end_date, created_by,
+                        commercial_stage, client_approved_at
+                    ) VALUES (?, ?, 'active', ?, ?, ?, ?, 'approved', datetime('now'))
                 `, [
                     quote_data.project_name,
                     `${quote_data.description}\n\nClient: ${quote_data.client_name}`,

@@ -2215,6 +2215,14 @@ export const migrations: Migration[] = [
     up: [
       `ALTER TABLE scoping_quotations ADD COLUMN custom_hours_json TEXT`
     ]
+  },
+  {
+    version: 49,
+    description: 'Proyectos en ejecución (active/completed) que quedaron en etapa quoting pasan a approved (creados desde cotización antes de fijar la etapa)',
+    up: [
+      `UPDATE projects SET commercial_stage = 'approved', client_approved_at = COALESCE(client_approved_at, created_at)
+       WHERE commercial_stage = 'quoting' AND status IN ('active', 'completed')`
+    ]
   }
 ];
 
