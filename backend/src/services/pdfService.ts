@@ -157,8 +157,13 @@ export function generateClosureReport(report: ClosureReport): Promise<Buffer> {
             ? `Inicio: ${project.start_date ?? NO_DATA} — Término: ${project.end_date ?? NO_DATA}`
             : 'Fechas: sin registrar');
         doc.text(`Entrega aceptada: ${project.delivery_accepted_at ? formatChileDate(project.delivery_accepted_at) : 'Pendiente'}`);
-        doc.text(`Cierre financiero: ${project.financial_closed_at ? formatChileDate(project.financial_closed_at) : 'Pendiente'}`);
-        doc.text(`Listo para cerrar finanzas: ${report.can_close_financials ? 'Sí' : 'No'}`);
+        // Ya cerradas las finanzas, "listo para cerrar" deja de tener sentido: solo se informa la fecha de cierre
+        if (project.financial_closed_at) {
+            doc.text(`Cierre financiero completado el ${formatChileDate(project.financial_closed_at)}`);
+        } else {
+            doc.text('Cierre financiero: Pendiente');
+            doc.text(`Listo para cerrar finanzas: ${report.can_close_financials ? 'Sí' : 'No'}`);
+        }
 
         drawSection(doc, 'Cotizado vs Real');
         const comparison: TableColumn[] = [{ width: 150 }, { width: 115, align: 'right' }, { width: 115, align: 'right' }, { width: 115, align: 'right' }];

@@ -149,15 +149,25 @@ describe('Informe de cierre - servicio, endpoints y PDF (SQLite real)', () => {
         );
     }
 
-    async function addTask(projectId: number, title: string, status: string): Promise<void> {
+    /** Crea la tarea en una columna del tablero del proyecto (la crea si no existe); isDone marca la columna de terminadas. */
+    async function addTask(
+        projectId: number, title: string, status: string, columnName = 'Columna', isDoneColumn = false
+    ): Promise<number> {
         let board = await testDb.get(`SELECT id FROM task_boards WHERE project_id = ?`, [projectId]);
         if (!board) board = { id: (await testDb.run(`INSERT INTO task_boards (project_id, name) VALUES (?, 'Tablero')`, [projectId])).id };
-        let column = await testDb.get(`SELECT id FROM task_columns WHERE board_id = ?`, [board.id]);
-        if (!column) column = { id: (await testDb.run(`INSERT INTO task_columns (board_id, name, position) VALUES (?, 'Columna', 0)`, [board.id])).id };
-        await testDb.run(
+        let column = await testDb.get(`SELECT id FROM task_columns WHERE board_id = ? AND name = ?`, [board.id, columnName]);
+        if (!column) {
+            column = {
+                id: (await testDb.run(
+                    `INSERT INTO task_columns (board_id, name, position, is_done_column) VALUES (?, ?, 0, ?)`,
+                    [board.id, columnName, isDoneColumn ? 1 : 0]
+                )).id
+            };
+        }
+        return (await testDb.run(
             `INSERT INTO tasks (board_id, column_id, title, status, reporter_id) VALUES (?, ?, ?, ?, ?)`,
             [board.id, column.id, title, status, users.lead]
-        );
+        )).id!;
     }
 
     async function addApprovedQuote(
@@ -283,6 +293,42 @@ describe('Informe de cierre - servicio, endpoints y PDF (SQLite real)', () => {
             ['timesheets_approved', false], ['tasks_done', false], ['required_documents', true]
         ]);
         for (const entry of report.checklist) expect(entry.label.length).toBeGreaterThan(0);
+    });
+
+    it('una tarea movida a la columna Done cuenta como terminada aunque su status siga en todo, y una en otra columna sigue pendiente', async () => {
+        const projectId = await addProject({ deliveryAcceptedAt: '2026-10-20 10:00:00' });
+        // El tablero crea las tareas con status 'todo' y al terminarlas solo cambia su column_id: el status no se toca.
+        const movida = await addTask(projectId, 'Movida a Done', 'todo', 'To Do');
+        await addTask(projectId, 'Sigue en To Do', 'todo', 'To Do');
+        await addTask(projectId, 'En progreso', 'todo', 'In Progress');
+        const doneColumn = (await testDb.run(
+            `INSERT INTO task_columns (board_id, name, position, is_done_column)
+             VALUES ((SELECT board_id FROM tasks WHERE id = ?), 'Done', 6, 1)`, [movida]
+        )).id!;
+        await testDb.run(`UPDATE tasks SET column_id = ? WHERE id = ?`, [doneColumn, movida]);
+
+        const report = (await closureReportService.getReport(projectId))!;
+
+        expect(item(report, 'tasks_done')).toMatchObject({ ok: false, pending_count: 2, blocking: false });
+
+        await testDb.run(`UPDATE tasks SET column_id = ?`, [doneColumn]);
+        const allDone = (await closureReportService.getReport(projectId))!;
+
+        expect(item(allDone, 'tasks_done')).toMatchObject({ ok: true, pending_count: 0 });
+    });
+
+    it('las columnas de terminadas se reconocen por is_done_column o por su nombre (done, completed, finished), igual que el listado de proyectos', async () => {
+        const projectId = await addProject({ deliveryAcceptedAt: '2026-10-20 10:00:00' });
+        await addTask(projectId, 'Columna marcada', 'todo', 'Entregadas', true);
+        await addTask(projectId, 'Por nombre Done', 'todo', 'Done');
+        await addTask(projectId, 'Por nombre con espacios', 'todo', ' Completed ');
+        await addTask(projectId, 'Por nombre Finished', 'todo', 'finished');
+        await addTask(projectId, 'Pendiente real', 'todo', 'Backlog');
+        await addTask(projectId, 'Status done en otra columna', 'done', 'Backlog');
+
+        const report = (await closureReportService.getReport(projectId))!;
+
+        expect(item(report, 'tasks_done')).toMatchObject({ ok: false, pending_count: 1 });
     });
 
     it('can_close_financials coincide con lo que acepta POST financial-close', async () => {
@@ -422,10 +468,10 @@ describe('Informe de cierre - servicio, endpoints y PDF (SQLite real)', () => {
         expect(pdf.status).toBe(200);
     });
 
-    it('rpa_developer y billing reciben 403 en el JSON y en el PDF', async () => {
+    it('rpa_developer, rpa_operations y billing reciben 403 en el JSON y en el PDF', async () => {
         const projectId = await addProject();
 
-        for (const role of ['rpa_developer', 'billing']) {
+        for (const role of ['rpa_developer', 'rpa_operations', 'billing']) {
             const json = await getJson(projectId, role);
             const pdf = await request(app).get(`/api/commercial/projects/${projectId}/closure-report.pdf`).set('x-test-role', role);
             expect({ role, json: json.status, pdf: pdf.status }).toEqual({ role, json: 403, pdf: 403 });

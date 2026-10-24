@@ -127,7 +127,35 @@ describe('pdfService.generateClosureReport', () => {
         }));
 
         expect(lines).toContain('Entrega aceptada: 2026-10-24');
-        expect(lines).toContain('Cierre financiero: 2026-10-26');
+        expect(lines).toContain('Cierre financiero completado el 2026-10-26');
+    });
+
+    it('antes del cierre financiero indica que está pendiente y si ya se puede cerrar', async () => {
+        const [listo, noListo] = await extractLines(
+            buildReport({ can_close_financials: true }),
+            buildReport({ can_close_financials: false })
+        );
+
+        expect(listo).toContain('Cierre financiero: Pendiente');
+        expect(listo).toContain('Listo para cerrar finanzas: Sí');
+        expect(noListo).toContain('Cierre financiero: Pendiente');
+        expect(noListo).toContain('Listo para cerrar finanzas: No');
+        expect(listo.some(line => line.startsWith('Cierre financiero completado'))).toBe(false);
+    });
+
+    it('tras el cierre financiero solo informa que se completó, sin repetir si está listo para cerrar', async () => {
+        const closed = { ...buildReport().project, financial_closed_at: '2026-10-26 12:00:00' };
+
+        const [conPendientes, sinPendientes] = await extractLines(
+            buildReport({ project: closed, can_close_financials: false }),
+            buildReport({ project: closed, can_close_financials: true })
+        );
+
+        for (const lines of [conPendientes, sinPendientes]) {
+            expect(lines).toContain('Cierre financiero completado el 2026-10-26');
+            expect(lines.some(line => line.startsWith('Listo para cerrar finanzas'))).toBe(false);
+            expect(lines).not.toContain('Cierre financiero: Pendiente');
+        }
     });
 
     it('sin fechas de inicio y término imprime una sola línea "Fechas: sin registrar"', async () => {

@@ -109,9 +109,13 @@ export class ClosureReportService {
         const unapprovedTimeEntries = await count(
             `SELECT COUNT(*) AS count FROM time_entries WHERE project_id = ? AND approval_status <> 'approved'`
         );
+        // El tablero termina una tarea moviéndola a la columna Done sin tocar su status (nace 'todo'); la columna de
+        // terminadas se reconoce igual que en el listado de proyectos (projectController.getProjects).
         const openTasks = await count(
             `SELECT COUNT(*) AS count FROM tasks t JOIN task_boards tb ON tb.id = t.board_id
-             WHERE tb.project_id = ? AND t.status <> 'done'`
+             WHERE tb.project_id = ? AND t.status <> 'done'
+               AND NOT EXISTS (SELECT 1 FROM task_columns tc WHERE tc.id = t.column_id
+                 AND (tc.is_done_column = 1 OR LOWER(TRIM(tc.name)) IN ('done', 'completed', 'finished')))`
         );
         const missingDocuments =
             (project.require_purchase_order && !await hasDocument('purchase_order') ? 1 : 0)
