@@ -298,6 +298,9 @@ export const ScopingPage: React.FC = () => {
     setSavedQuoteCode(record.code);
     setHistoryProposal(null);
     setWizardSession((n) => n + 1);
+    // Sin números ni error de la sesión anterior mientras calcula el nuevo registro
+    setCalculation(null);
+    setCalculationError(null);
     refreshPreview();
   };
 
@@ -329,6 +332,9 @@ export const ScopingPage: React.FC = () => {
     setArchetypeId(undefined);
     setCustomHoursEnabled(false);
     setWizardSession((n) => n + 1);
+    // Sin números ni error de la sesión anterior mientras calcula el levantamiento nuevo
+    setCalculation(null);
+    setCalculationError(null);
     refreshPreview();
     setActiveMainTab('wizard');
   };
@@ -406,6 +412,7 @@ export const ScopingPage: React.FC = () => {
                         calculation={calculation}
                         loading={isCalculating}
                         error={calculationError}
+                        onRetry={() => refreshPreview()}
                         onOpenProposal={handleOpenWizardProposal}
                         onSaveQuote={handleSaveQuote}
                         isSaving={isSaving}

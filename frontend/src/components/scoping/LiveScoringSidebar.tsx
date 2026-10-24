@@ -20,6 +20,8 @@ interface LiveScoringSidebarProps {
   loading?: boolean;
   // Mensaje del servidor cuando el cálculo falló; el panel no muestra números en ese caso
   error?: string | null;
+  // Vuelve a calcular con las entradas actuales; sin él el Alert no ofrece "Reintentar"
+  onRetry?: () => void;
   onOpenProposal: () => void;
   onSaveQuote: () => void;
   isSaving?: boolean;
@@ -29,6 +31,7 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
   calculation,
   loading = false,
   error = null,
+  onRetry,
   onOpenProposal,
   onSaveQuote,
   isSaving = false
@@ -57,6 +60,11 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
             showIcon
             message="No se pudo calcular la estimación"
             description={error}
+            action={onRetry && (
+              <Button size="small" onClick={onRetry}>
+                Reintentar
+              </Button>
+            )}
           />
         ) : loading ? (
           <Space size={8}>

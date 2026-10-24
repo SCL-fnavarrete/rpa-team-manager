@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within, act } from '@testing-library/react';
+import { render, screen, waitFor, within, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { message } from 'antd';
 import { MemoryRouter } from 'react-router-dom';
@@ -268,6 +268,7 @@ describe('ScopingPage', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -366,8 +367,45 @@ describe('ScopingPage', () => {
         uses_vdi: true,
         volume_per_frequency: 80,
         aht_minutes: 12,
-        custom_hours: { lp: 60, crpa: 40, ar: 300, adv: 92, weeks: 9 }
+        custom_hours: { lp: 60, crpa: 40, ar: 300, adv: 92, weeks: 9 },
+        currency: 'CLP',
+        hourly_labor_cost: 14000,
+        target_hourly_rate: 36000,
+        internal_cost_rate: 18000,
+        exception_rate_pct: 6,
+        current_ftes: 2
       }));
+    });
+
+    it('vaciar tarifas o excepciones al editar envía el defecto de la moneda en calculate y en el PUT (el panel coincide con lo guardado)', async () => {
+      mocked.getById.mockResolvedValue(makeRecord({ target_hourly_rate: 50000, hourly_labor_cost: 20000, exception_rate_pct: 8 }));
+      renderPage();
+      await waitForPanel();
+      await openHistoryAndEdit();
+      expect(screen.getByLabelText(/Tarifa Venta por Hora/)).toHaveDisplayValue('50000');
+
+      await user.clear(screen.getByLabelText(/Tarifa Venta por Hora/));
+      await user.clear(screen.getByLabelText(/Costo Hora Analista Cliente/));
+      await user.clear(screen.getByLabelText(/Tasa de Excepciones/));
+
+      // El PUT parcial conservaría el valor guardado si la clave se omitiera: va el defecto, igual que a calculate
+      await waitFor(() => expect(lastCalculateInputs()).toEqual(expect.objectContaining({
+        target_hourly_rate: 36000,
+        hourly_labor_cost: 14000,
+        exception_rate_pct: 3
+      })));
+      await waitForPanel();
+      await clickSave();
+
+      await waitFor(() => expect(mocked.update).toHaveBeenCalledTimes(1));
+      const payload = mocked.update.mock.calls[0][1];
+      expect(payload).toEqual(expect.objectContaining({
+        currency: 'CLP',
+        target_hourly_rate: 36000,
+        hourly_labor_cost: 14000,
+        exception_rate_pct: 3
+      }));
+      expect(payload).toEqual(lastCalculateInputs());
     });
 
     it('apagar la calibración manual y guardar limpia custom_hours (null, no se conserva la anterior)', async () => {
@@ -478,6 +516,26 @@ describe('ScopingPage', () => {
       expect(screen.getByText('236')).toBeInTheDocument();
     });
 
+    it('el Alert de error ofrece Reintentar, que vuelve a calcular con las entradas actuales', async () => {
+      let failing = true;
+      mocked.calculate.mockImplementation((inputs: ScopingInputs) =>
+        failing ? Promise.reject(new Error('Servicio no disponible')) : Promise.resolve(makeCalculation(inputs))
+      );
+      renderPage();
+      expect(await screen.findByText('Servicio no disponible')).toBeInTheDocument();
+      const callsBefore = mocked.calculate.mock.calls.length;
+      const inputsBefore = lastCalculateInputs();
+
+      failing = false;
+      await user.click(screen.getByText('Reintentar'));
+
+      await waitForPanel();
+      expect(mocked.calculate).toHaveBeenCalledTimes(callsBefore + 1);
+      expect(lastCalculateInputs()).toEqual(inputsBefore);
+      expect(screen.queryByText('No se pudo calcular la estimación')).not.toBeInTheDocument();
+      expect(screen.queryByText('Reintentar')).not.toBeInTheDocument();
+    });
+
     it('el panel indica carga mientras calcula', async () => {
       renderPage();
       await waitForPanel();
@@ -578,15 +636,23 @@ describe('ScopingPage', () => {
       await openTab(/Historial de Cotizaciones/);
       await screen.findByText('COT-2026-007');
       const searched = () => mocked.getAll.mock.calls.map((call) => call[0]?.search).filter(Boolean);
+      const searchInput = screen.getByPlaceholderText(/Buscar por cliente/);
 
-      await user.type(screen.getByPlaceholderText(/Buscar por cliente/), 'Acme');
+      // El reloj avanza solo cuando el test lo dice: las teclas se simulan seguidas, sin depender de la velocidad de la máquina
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        for (const value of ['A', 'Ac', 'Acm', 'Acme']) fireEvent.change(searchInput, { target: { value } });
 
-      // Cuatro teclas seguidas no disparan ninguna petición todavía...
-      expect(searched()).toEqual([]);
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      expect(searched()).toEqual([]);
-      // ...y luego sale una sola, con el texto completo
-      await waitFor(() => expect(searched()).toEqual(['Acme']), { timeout: 2000 });
+        // Cuatro teclas seguidas no disparan ninguna petición todavía...
+        expect(searched()).toEqual([]);
+        await act(async () => { vi.advanceTimersByTime(300); });
+        expect(searched()).toEqual([]);
+        // ...y pasados los 400 ms sale una sola, con el texto completo
+        await act(async () => { vi.advanceTimersByTime(150); });
+        await waitFor(() => expect(searched()).toEqual(['Acme']));
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('si falla la carga del historial se muestra el error del servidor', async () => {
@@ -601,6 +667,34 @@ describe('ScopingPage', () => {
   });
 
   describe('Nuevo Levantamiento (M8)', () => {
+    it('al editar o iniciar uno nuevo no se muestran los números de la sesión anterior mientras calcula', async () => {
+      renderPage();
+      await waitForPanel();
+      expect(screen.getByText('236')).toBeInTheDocument();
+
+      // Editar (el registro tiene OCR y VDI: 492 HH): mientras calcula no queda el 236 anterior
+      let finishCalculation: (value: ScopingCalculationResult) => void = () => undefined;
+      mocked.calculate.mockImplementationOnce(() => new Promise<ScopingCalculationResult>((resolve) => {
+        finishCalculation = resolve;
+      }));
+      await openHistoryAndEdit();
+      expect(await screen.findByText('Calculando…')).toBeInTheDocument();
+      expect(screen.queryByText('236')).not.toBeInTheDocument();
+      await act(async () => finishCalculation(makeCalculation({ requires_ocr: true })));
+      expect(await screen.findByText('492')).toBeInTheDocument();
+
+      // Nuevo Levantamiento: tampoco queda el 492 del registro editado
+      mocked.calculate.mockImplementationOnce(() => new Promise<ScopingCalculationResult>((resolve) => {
+        finishCalculation = resolve;
+      }));
+      await openTab(/Historial de Cotizaciones/);
+      await user.click(await screen.findByText(/Nuevo Levantamiento \(15 min\)/));
+      expect(await screen.findByText('Calculando…')).toBeInTheDocument();
+      expect(screen.queryByText('492')).not.toBeInTheDocument();
+      await act(async () => finishCalculation(makeCalculation()));
+      expect(await screen.findByText('236')).toBeInTheDocument();
+    });
+
     it('reinicia cronómetro, vuelve al Paso 1 y limpia el código mostrado', async () => {
       renderPage();
       await waitForPanel();

@@ -22,6 +22,9 @@ export const DEFAULT_RATES: Record<ScopingCurrency, CurrencyRates> = {
   UF: { hourly_labor_cost: 0.36, target_hourly_rate: 0.95, internal_cost_rate: 0.48 }
 };
 
+/** Tasa de excepciones que usa el motor cuando no se informa (scopingCalculationEngine: exception_rate_pct ?? 3) */
+export const DEFAULT_EXCEPTION_RATE_PCT = 3;
+
 export const DEFAULT_INPUTS: ScopingInputs = {
   client_name: '',
   process_name: '',
@@ -48,7 +51,7 @@ export const DEFAULT_INPUTS: ScopingInputs = {
   uses_vdi: false,
   requires_ocr: false,
   structured_data_pct: 'gte_80',
-  exception_rate_pct: 3,
+  exception_rate_pct: DEFAULT_EXCEPTION_RATE_PCT,
 
   currency: 'CLP',
   ...DEFAULT_RATES.CLP
@@ -80,6 +83,10 @@ const FALLBACK_KEYS = [
   'uses_vdi', 'requires_ocr'
 ] as const;
 
+// Tarifas y tasa de excepciones: el motor usa su defecto cuando faltan, pero un PUT parcial conservaría el valor guardado.
+// Por eso un campo vaciado se rellena con el defecto en el cuerpo, y panel y registro guardado coinciden siempre.
+const RATE_KEYS = ['hourly_labor_cost', 'target_hourly_rate', 'internal_cost_rate'] as const;
+
 const CUSTOM_HOURS_KEYS = ['lp', 'crpa', 'ar', 'adv', 'weeks'] as const;
 
 const hasValue = (value: unknown): boolean =>
@@ -105,6 +112,8 @@ export function normalizeCustomHours(raw: unknown): CustomHours | null {
  * (`form.getFieldsValue(true)`: incluye los campos de pasos aún no visitados).
  * `custom_hours` va siempre: objeto con las claves calibradas, o null para limpiar/no calibrar
  * (en un PUT, omitirlo conservaría la calibración anterior).
+ * Tarifas y tasa de excepciones vaciadas llevan el defecto de la moneda / 3, no se omiten (ver RATE_KEYS).
+ * Volumen y AHT vacíos sí se omiten: la API responde un 400 legible.
  */
 export function buildScopingInputs(values: Record<string, unknown> = {}): ScopingInputs {
   const inputs: Record<string, unknown> = {};
@@ -112,6 +121,11 @@ export function buildScopingInputs(values: Record<string, unknown> = {}): Scopin
   for (const key of [...CALCULATION_KEYS, ...DETAIL_KEYS]) {
     if (hasValue(values[key])) inputs[key] = values[key];
   }
+  const rates = DEFAULT_RATES[(inputs.currency as ScopingCurrency | undefined) ?? 'CLP'];
+  for (const key of RATE_KEYS) {
+    if (inputs[key] === undefined) inputs[key] = rates[key];
+  }
+  if (inputs.exception_rate_pct === undefined) inputs.exception_rate_pct = DEFAULT_EXCEPTION_RATE_PCT;
   inputs.custom_hours = normalizeCustomHours(values.custom_hours);
   return inputs as unknown as ScopingInputs;
 }
