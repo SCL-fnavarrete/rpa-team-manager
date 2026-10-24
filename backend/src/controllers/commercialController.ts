@@ -4,6 +4,9 @@ import { db } from '../database/database';
 import { notificationService } from '../services/notificationService';
 import { financeService, Currency } from '../services/financeService';
 import { activityLogService } from '../services/activityLogService';
+import { closureReportService } from '../services/closureReportService';
+import { generateClosureReport } from '../services/pdfService';
+import { logger } from '../utils/logger';
 
 const canManage = (role?: string) => role === 'team_lead' || role === 'rpa_operations';
 const canSeeFinancials = (role?: string) => role === 'team_lead';
@@ -272,6 +275,32 @@ export class CommercialController {
     await db.run(`UPDATE projects SET financial_closed_at = datetime('now'), status = 'completed', actual_end_date = COALESCE(actual_end_date, date('now')) WHERE id = ?`, [projectId]);
     await activityLogService.logActivity(req.user?.id, 'project', projectId, 'financials_closed', null, await db.get('SELECT id, financial_closed_at, status FROM projects WHERE id = ?', [projectId]));
     res.json({ data: await db.get('SELECT id, status, delivery_accepted_at, financial_closed_at FROM projects WHERE id = ?', [projectId]) });
+  };
+
+  getClosureReport = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const report = await closureReportService.getReport(Number(req.params.projectId));
+      if (!report) { res.status(404).json({ error: 'Proyecto no encontrado' }); return; }
+      res.json({ data: report });
+    } catch (error) {
+      logger.error('Get closure report error:', error);
+      res.status(500).json({ error: 'Error al generar el informe de cierre' });
+    }
+  };
+
+  getClosureReportPdf = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const projectId = Number(req.params.projectId);
+      const report = await closureReportService.getReport(projectId);
+      if (!report) { res.status(404).json({ error: 'Proyecto no encontrado' }); return; }
+      const buffer = await generateClosureReport(report);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="informe-cierre-${projectId}.pdf"`);
+      res.send(buffer);
+    } catch (error) {
+      logger.error('Get closure report PDF error:', error);
+      res.status(500).json({ error: 'Error al generar el informe de cierre' });
+    }
   };
 
   getCapacity = async (req: AuthenticatedRequest, res: Response): Promise<void> => {

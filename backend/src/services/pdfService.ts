@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit';
+import { ClosureReport } from './closureReportService';
 
 export interface PaymentStatementMilestone {
     name: string;
@@ -69,6 +70,140 @@ export function generatePaymentStatement(data: PaymentStatementData): Promise<Bu
                 doc.text(`${m.name} — ${m.amount.toLocaleString('es-CL')} ${m.currency} — ${statusLabel} — ${dateLabel}`);
             }
         }
+        doc.end();
+    });
+}
+
+const PROJECT_STATUS_LABEL: Record<string, string> = {
+    active: 'Activo',
+    on_hold: 'En pausa',
+    completed: 'Completado',
+    cancelled: 'Cancelado'
+};
+
+const NO_DATA = '—';
+const ROW_HEIGHT = 16;
+
+const formatNumber = (value: number): string => value.toLocaleString('es-CL', { maximumFractionDigits: 2 });
+const formatSigned = (value: number, format: (n: number) => string): string => `${value > 0 ? '+' : value < 0 ? '-' : ''}${format(Math.abs(value))}`;
+const formatPercent = (value: number): string => `${formatNumber(value)} %`;
+
+type TableColumn = { width: number; align?: 'left' | 'right' };
+
+/** Deja espacio para la siguiente fila o bloque: si no cabe en la página, pasa a una nueva. */
+function ensureSpace(doc: PDFKit.PDFDocument, height: number): void {
+    if (doc.y + height > doc.page.height - doc.page.margins.bottom) doc.addPage();
+}
+
+function drawRow(doc: PDFKit.PDFDocument, columns: TableColumn[], cells: string[], bold = false): void {
+    ensureSpace(doc, ROW_HEIGHT);
+    const left = doc.page.margins.left;
+    const top = doc.y;
+    let x = left;
+    doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10);
+    columns.forEach((column, index) => {
+        doc.text(cells[index], x, top, { width: column.width - 6, align: column.align ?? 'left', lineBreak: false, ellipsis: true });
+        x += column.width;
+    });
+    doc.x = left;
+    doc.y = top + ROW_HEIGHT;
+}
+
+function drawSection(doc: PDFKit.PDFDocument, title: string): void {
+    ensureSpace(doc, ROW_HEIGHT * 3);
+    doc.moveDown(0.5);
+    doc.font('Helvetica').fontSize(13).text(title, doc.page.margins.left, doc.y, { underline: true });
+    doc.moveDown(0.3);
+}
+
+/** Genera el informe de cierre del proyecto: resumen, cotizado vs real, equipo, hitos de pago y pendientes. */
+export function generateClosureReport(report: ClosureReport): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+        const doc = new PDFDocument({ margin: 50 });
+        const chunks: Buffer[] = [];
+
+        doc.on('data', (chunk) => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+
+        const { project, quoted, actual } = report;
+        const left = doc.page.margins.left;
+        const hasQuote = quoted.version !== null;
+
+        doc.fontSize(18).text('Informe de Cierre', { align: 'center' });
+        doc.moveDown();
+        doc.fontSize(11);
+        doc.text(`Proyecto: ${project.name}`);
+        doc.text(`Cliente: ${project.client_name ?? 'N/A'}`);
+        doc.text(`Comercial: ${project.sales_rep_name ?? 'N/A'}`);
+        doc.text(`Generado: ${report.generated_at.slice(0, 10)}`);
+
+        drawSection(doc, 'Resumen');
+        doc.fontSize(11);
+        doc.text(`Estado: ${PROJECT_STATUS_LABEL[project.status] || project.status}`);
+        doc.text(`Inicio: ${project.start_date ?? NO_DATA} — Término: ${project.end_date ?? NO_DATA}`);
+        doc.text(`Entrega aceptada: ${project.delivery_accepted_at?.slice(0, 10) ?? 'Pendiente'}`);
+        doc.text(`Cierre financiero: ${project.financial_closed_at?.slice(0, 10) ?? 'Pendiente'}`);
+        doc.text(`Listo para cerrar finanzas: ${report.can_close_financials ? 'Sí' : 'No'}`);
+
+        drawSection(doc, 'Cotizado vs Real');
+        const comparison: TableColumn[] = [{ width: 150 }, { width: 115, align: 'right' }, { width: 115, align: 'right' }, { width: 115, align: 'right' }];
+        drawRow(doc, comparison, ['Concepto', 'Cotizado', 'Real', 'Diferencia'], true);
+        const comparisonRow = (
+            label: string, quotedValue: number | null, realValue: number, format: (n: number) => string, formatDiff = format
+        ): void => {
+            const quotedKnown = hasQuote && quotedValue !== null;
+            drawRow(doc, comparison, [
+                label,
+                quotedKnown ? format(quotedValue) : NO_DATA,
+                format(realValue),
+                quotedKnown ? formatSigned(realValue - quotedValue, formatDiff) : NO_DATA
+            ]);
+        };
+        comparisonRow('Venta', quoted.amount_clp, actual.sale_price, formatCLP);
+        comparisonRow('Costo', quoted.estimated_cost_clp, actual.real_cost, formatCLP);
+        comparisonRow('Horas', quoted.hours, actual.approved_hours, formatNumber);
+        comparisonRow('Margen', quoted.margin_percent, actual.real_margin_percentage, formatPercent, n => `${formatNumber(n)} pp`);
+        doc.moveDown(0.5);
+        doc.font('Helvetica').fontSize(10);
+        doc.text(hasQuote ? `Cotización aprobada: versión ${quoted.version}` : 'Sin cotización aprobada registrada.', left, doc.y);
+        doc.text(`Utilidad real: ${formatCLP(actual.real_profit)}`);
+        doc.text(`Horas planificadas: ${formatNumber(actual.planned_hours)}`);
+        doc.text(`Impacto económico del desvío: ${formatSigned(actual.variance_impact, formatCLP)}`);
+
+        drawSection(doc, 'Equipo');
+        if (report.team.length === 0) {
+            doc.font('Helvetica').fontSize(10).text('Sin personas asignadas ni horas aprobadas.', left, doc.y);
+        } else {
+            const team: TableColumn[] = [{ width: 255 }, { width: 120, align: 'right' }, { width: 120, align: 'right' }];
+            drawRow(doc, team, ['Persona', 'Horas presupuestadas', 'Horas reales'], true);
+            for (const member of report.team) {
+                drawRow(doc, team, [member.user_name, formatNumber(member.budgeted_hours), formatNumber(member.actual_hours)]);
+            }
+        }
+
+        drawSection(doc, 'Hitos de pago');
+        if (report.milestones.length === 0) {
+            doc.font('Helvetica').fontSize(10).text('Sin hitos de pago registrados.', left, doc.y);
+        } else {
+            const milestones: TableColumn[] = [{ width: 205 }, { width: 120, align: 'right' }, { width: 90 }, { width: 80 }];
+            drawRow(doc, milestones, ['Hito', 'Monto', 'Estado', 'Fecha'], true);
+            for (const m of report.milestones) {
+                drawRow(doc, milestones, [
+                    m.name, `${m.amount.toLocaleString('es-CL')} ${m.currency}`, STATUS_LABEL[m.status] || m.status, m.planned_date ?? 's/f'
+                ]);
+            }
+        }
+
+        drawSection(doc, 'Pendientes');
+        const checklist: TableColumn[] = [{ width: 70 }, { width: 245 }, { width: 80, align: 'right' }, { width: 100 }];
+        drawRow(doc, checklist, ['Estado', 'Control', 'Pendientes', 'Tipo'], true);
+        for (const item of report.checklist) {
+            drawRow(doc, checklist, [
+                item.ok ? 'Completo' : 'Pendiente', item.label, String(item.pending_count), item.blocking ? 'Bloqueante' : 'Advertencia'
+            ]);
+        }
+
         doc.end();
     });
 }

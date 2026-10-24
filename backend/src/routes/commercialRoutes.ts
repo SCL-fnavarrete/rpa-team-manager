@@ -18,6 +18,8 @@ router.get('/projects/:projectId/documents', commercialController.getDocuments);
 router.post('/projects/:projectId/documents', commercialController.addDocument);
 router.post('/projects/:projectId/delivery-acceptance', commercialController.acceptDelivery);
 router.post('/projects/:projectId/financial-close', authorize(['team_lead']), commercialController.closeFinancials);
+router.get('/projects/:projectId/closure-report', authorize(['team_lead']), commercialController.getClosureReport);
+router.get('/projects/:projectId/closure-report.pdf', authorize(['team_lead']), commercialController.getClosureReportPdf);
 router.get('/projects/:projectId/capacity', commercialController.getCapacity);
 router.post('/projects/:projectId/capacity', commercialController.saveCapacity);
 router.delete('/projects/:projectId/capacity/:userId', commercialController.deleteCapacity);
