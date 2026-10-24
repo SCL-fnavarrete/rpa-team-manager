@@ -29,6 +29,8 @@ export interface PortfolioRow {
   projected_profit: number;
   real_margin_percentage: number;
   projected_margin_percentage: number;
+  /** 'projected': el costo real es el planificado porque el proyecto aún no tiene horas aprobadas. */
+  real_hours_source: 'approved' | 'projected';
   health_semaphore: PortfolioHealthSemaphore;
   invoiced_clp: number;
   collected_clp: number;

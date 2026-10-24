@@ -32,6 +32,7 @@ const makeRow = (overrides: Partial<PortfolioRow> = {}): PortfolioRow => ({
   projected_profit: 400000,
   real_margin_percentage: 65,
   projected_margin_percentage: 40,
+  real_hours_source: 'approved',
   health_semaphore: 'green',
   invoiced_clp: 300000,
   collected_clp: 100000,
@@ -125,11 +126,14 @@ describe('PortfolioPage', () => {
     expect(within(rowOf('Proyecto Beta')).getByText('25,0%')).toBeInTheDocument();
   });
 
-  it('aclara en las tarjetas que venta, costos y por facturar excluyen perdidos y cancelados', async () => {
+  it('rotula las tarjetas de venta, costos y por facturar como "Solo proyectos con OK del cliente"', async () => {
     renderPage();
 
     for (const id of ['kpi-sale_price', 'kpi-real_cost', 'kpi-projected_cost', 'kpi-projected_profit', 'kpi-pending_to_invoice']) {
-      expect(within(await screen.findByTestId(id)).getByText('No incluye proyectos perdidos ni cancelados')).toBeInTheDocument();
+      expect(within(await screen.findByTestId(id)).getByText('Solo proyectos con OK del cliente')).toBeInTheDocument();
+    }
+    for (const id of ['kpi-invoiced', 'kpi-collected']) {
+      expect(within(screen.getByTestId(id)).getByText('Incluye todos los proyectos de la cartera')).toBeInTheDocument();
     }
   });
 
@@ -139,13 +143,26 @@ describe('PortfolioPage', () => {
     expect(await screen.findByRole('button', { name: 'Proyecto Alfa' })).toBeInTheDocument();
   });
 
-  it('muestra estado vacío cuando rows está vacío', async () => {
+  it('sin filtros activos el estado vacío dice "Aún no hay proyectos", sin hablar de filtros', async () => {
     (apiService.getPortfolio as any).mockResolvedValue(emptyResult());
     renderPage();
 
-    expect(await screen.findByText('No hay proyectos en la cartera con estos filtros')).toBeInTheDocument();
+    expect(await screen.findByText('Aún no hay proyectos')).toBeInTheDocument();
+    expect(screen.queryByText('No hay proyectos en la cartera con estos filtros')).not.toBeInTheDocument();
     expect(within(screen.getByTestId('kpi-projects')).getByText('0')).toBeInTheDocument();
   });
+
+  it('con un filtro activo y sin resultados el estado vacío habla de los filtros', async () => {
+    renderPage();
+    await screen.findByText('Proyecto Alfa');
+    (apiService.getPortfolio as any).mockResolvedValue(emptyResult());
+
+    await userEvent.click(screen.getByRole('combobox', { name: /filtrar por cliente/i }));
+    await userEvent.click(await screen.findByTitle('Constructora Norte'));
+
+    expect(await screen.findByText('No hay proyectos en la cartera con estos filtros')).toBeInTheDocument();
+    expect(screen.queryByText('Aún no hay proyectos')).not.toBeInTheDocument();
+  }, 30000);
 
   it('cambiar el filtro de cliente vuelve a llamar a getPortfolio con client_id', async () => {
     renderPage();
@@ -189,7 +206,8 @@ describe('PortfolioPage', () => {
     const card = await screen.findByTestId('sales-by-rep');
     expect(within(card).getByText('Sin asignar')).toBeInTheDocument();
     expect(within(card).getByText('$500.000 CLP')).toBeInTheDocument();
-    expect(within(card).getByText('Proyectos (incl. en cotización)')).toBeInTheDocument();
+    expect(within(card).getByText('Proyectos')).toBeInTheDocument();
+    expect(within(card).getByText('Solo proyectos con OK del cliente.')).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/NaN/);
   });
 
@@ -219,23 +237,29 @@ describe('PortfolioPage', () => {
     expect(broken.getByText('$250.000 CLP')).toBeInTheDocument();
   });
 
-  it('no presenta como pendiente real el por facturar de proyectos perdidos o cancelados', async () => {
+  it('no presenta como pendiente real el por facturar de proyectos en cotización, perdidos o cancelados', async () => {
     (apiService.getPortfolio as any).mockResolvedValue(makeResult({
       rows: [
         makeRow({ project_id: 4, project_name: 'Proyecto Perdido', commercial_stage: 'lost', pending_to_invoice_clp: 777000 }),
         makeRow({ project_id: 5, project_name: 'Proyecto Cancelado', status: 'cancelled', pending_to_invoice_clp: 888000 }),
-        makeRow({ project_id: 6, project_name: 'Proyecto Vigente', pending_to_invoice_clp: 999000 })
+        makeRow({ project_id: 6, project_name: 'Proyecto Vigente', pending_to_invoice_clp: 999000 }),
+        makeRow({ project_id: 7, project_name: 'Proyecto Cotizando', commercial_stage: 'quoting', status: 'on_hold', pending_to_invoice_clp: 666000 }),
+        makeRow({ project_id: 8, project_name: 'Proyecto Desde Cotizacion', commercial_stage: 'quoting', status: 'active', pending_to_invoice_clp: 555000 })
       ]
     }));
     renderPage();
 
     await screen.findByText('Proyecto Vigente');
     expect(within(rowOf('Proyecto Vigente')).getByText('$999.000 CLP')).toBeInTheDocument();
+    // creado con "Crear desde cotización": etapa 'quoting' por defecto de la BD pero ya en ejecución, cuenta como venta
+    expect(within(rowOf('Proyecto Desde Cotizacion')).getByText('$555.000 CLP')).toBeInTheDocument();
+    expect(within(rowOf('Proyecto Cotizando')).queryByText('$666.000 CLP')).not.toBeInTheDocument();
+    expect(within(rowOf('Proyecto Cotizando')).getByText('—')).toBeInTheDocument();
     expect(within(rowOf('Proyecto Perdido')).queryByText('$777.000 CLP')).not.toBeInTheDocument();
     expect(within(rowOf('Proyecto Perdido')).getByText('—')).toBeInTheDocument();
     expect(within(rowOf('Proyecto Cancelado')).queryByText('$888.000 CLP')).not.toBeInTheDocument();
     expect(within(rowOf('Proyecto Cancelado')).getByText('—')).toBeInTheDocument();
-  });
+  }, 30000);
 
   it('muestra el pipeline con el monto de la última cotización y "Sin cotización" cuando no hay', async () => {
     (apiService.getPortfolio as any).mockResolvedValue(makeResult({
@@ -253,6 +277,54 @@ describe('PortfolioPage', () => {
     expect(within(within(card).getByRole('row', { name: /Oportunidad Delta/ })).getByText('Sin cotización')).toBeInTheDocument();
   });
 
+  it('marca "estimado" el costo real de un proyecto sin horas aprobadas, con la explicación en el tooltip', async () => {
+    (apiService.getPortfolio as any).mockResolvedValue(makeResult({
+      rows: [
+        makeRow({ project_id: 1, project_name: 'Proyecto Medido', real_hours_source: 'approved' }),
+        makeRow({ project_id: 2, project_name: 'Proyecto Sin Horas', real_hours_source: 'projected' })
+      ]
+    }));
+    renderPage();
+
+    await screen.findByText('Proyecto Sin Horas');
+    expect(within(rowOf('Proyecto Medido')).queryByText('estimado')).not.toBeInTheDocument();
+    const tag = within(rowOf('Proyecto Sin Horas')).getByText('estimado');
+
+    await userEvent.hover(tag);
+    expect(await screen.findByText('Sin horas aprobadas: se usa el costo planificado')).toBeInTheDocument();
+  }, 30000);
+
+  it('la tarjeta de costo real avisa cuántos proyectos del total tienen costo estimado, y no dice nada si ninguno', async () => {
+    (apiService.getPortfolio as any).mockResolvedValue(makeResult({
+      rows: [
+        makeRow({ project_id: 1, project_name: 'Medido', real_hours_source: 'approved' }),
+        makeRow({ project_id: 2, project_name: 'Estimado Uno', real_hours_source: 'projected' }),
+        makeRow({ project_id: 3, project_name: 'Estimado Dos', real_hours_source: 'projected' }),
+        // no suman al costo real total, así que tampoco cuentan en el aviso
+        makeRow({ project_id: 4, project_name: 'Estimado Cotizando', real_hours_source: 'projected', commercial_stage: 'quoting', status: 'on_hold' }),
+        makeRow({ project_id: 5, project_name: 'Estimado Perdido', real_hours_source: 'projected', commercial_stage: 'lost' })
+      ]
+    }));
+    const { unmount } = renderPage();
+
+    const card = await screen.findByTestId('kpi-real_cost');
+    expect(within(card).getByText('Incluye 2 proyectos con costo estimado (sin horas aprobadas)')).toBeInTheDocument();
+    expect(within(card).getByText('Solo proyectos con OK del cliente')).toBeInTheDocument();
+    expect(within(screen.getByTestId('kpi-projected_cost')).queryByText(/costo estimado/)).not.toBeInTheDocument();
+    unmount();
+
+    (apiService.getPortfolio as any).mockResolvedValue(makeResult({
+      rows: [makeRow({ project_id: 2, project_name: 'Único Estimado', real_hours_source: 'projected' })]
+    }));
+    const second = renderPage();
+    expect(await within(await second.findByTestId('kpi-real_cost')).findByText('Incluye 1 proyecto con costo estimado (sin horas aprobadas)')).toBeInTheDocument();
+    second.unmount();
+
+    (apiService.getPortfolio as any).mockResolvedValue(makeResult());
+    renderPage();
+    expect(within(await screen.findByTestId('kpi-real_cost')).queryByText(/costo estimado/)).not.toBeInTheDocument();
+  }, 30000);
+
   it('muestra un aviso con reintento cuando falla la carga', async () => {
     (apiService.getPortfolio as any).mockRejectedValueOnce({ response: { data: { error: 'Error al obtener la cartera' } } });
     renderPage();
@@ -261,5 +333,19 @@ describe('PortfolioPage', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Reintentar' }));
     expect(await screen.findByText('Proyecto Alfa')).toBeInTheDocument();
+  });
+
+  it('si la carga falla sin respuesta del servidor (p. ej. el 429 ya traducido) muestra el mensaje del error', async () => {
+    (apiService.getPortfolio as any).mockRejectedValueOnce(new Error('Hay demasiadas solicitudes. Espera antes de volver a intentarlo.'));
+    renderPage();
+
+    expect(await screen.findByText('Hay demasiadas solicitudes. Espera antes de volver a intentarlo.')).toBeInTheDocument();
+  });
+
+  it('si el error no trae ningún mensaje muestra un texto genérico en español', async () => {
+    (apiService.getPortfolio as any).mockRejectedValueOnce({});
+    renderPage();
+
+    expect(await screen.findByText('No se pudo cargar la cartera de proyectos.')).toBeInTheDocument();
   });
 });

@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Badge, Button, Card, Col, Row, Select, Space, Spin, Statistic, Table, Tag, Typography, theme } from 'antd';
+import { Badge, Button, Card, Col, Row, Select, Space, Spin, Statistic, Table, Tag, Tooltip, Typography, theme } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { ExclamationCircleOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { apiService } from '@/services/api';
 import { EmptyState, InlineErrorState, LoadingState } from '@/components/common/FeedbackStates';
 import { formatCLP, formatPercent, formatSpanishNumber, getProjectStatusColor } from '@/utils';
+import { isSaleRealized } from '@/utils/saleRealization';
 import { ProjectStatusLabels } from '@/types/project';
 import type {
   PortfolioCommercialStage,
@@ -37,13 +38,13 @@ const SEMAPHORE: Record<PortfolioHealthSemaphore, { status: 'success' | 'warning
   gray: { status: 'default', label: 'Sin datos' }
 };
 
-const NOT_REALIZED_NOTE = 'No incluye proyectos perdidos ni cancelados';
+const REALIZED_ONLY_NOTE = 'Solo proyectos con OK del cliente';
 const ALL_PROJECTS_NOTE = 'Incluye todos los proyectos de la cartera';
 const UNASSIGNED = 'Sin asignar';
 const FINANCIAL_COLUMNS_COUNT = 5;
 
-/** Negocio no realizado: el backend no lo suma a venta, costo ni por facturar de los totales. */
-const isUnrealized = (row: PortfolioRow): boolean => row.commercial_stage === 'lost' || row.status === 'cancelled';
+const estimatedCostNote = (count: number): string =>
+  `Incluye ${count} ${count === 1 ? 'proyecto' : 'proyectos'} con costo estimado (sin horas aprobadas)`;
 
 const loadDirectory = async (url: string): Promise<FilterOption[]> => {
   try {
@@ -60,15 +61,17 @@ interface KpiCardProps {
   title: string;
   value: number;
   note: string;
+  extraNote?: string;
   format?: (value: number) => string;
 }
 
-const KpiCard: React.FC<KpiCardProps> = ({ id, title, value, note, format = formatCLP }) => {
+const KpiCard: React.FC<KpiCardProps> = ({ id, title, value, note, extraNote, format = formatCLP }) => {
   const { token } = theme.useToken();
   return (
     <Card data-testid={`kpi-${id}`} styles={{ body: { padding: 18 } }} style={{ borderColor: token.colorBorderSecondary }}>
       <Statistic title={title} value={value} formatter={(val) => format(Number(val))} valueStyle={{ fontSize: 22, fontWeight: 700 }} />
       <div style={{ marginTop: 8, fontSize: 12, color: token.colorTextSecondary }}>{note}</div>
+      {extraNote && <div style={{ marginTop: 2, fontSize: 12, color: token.colorWarning }}>{extraNote}</div>}
     </Card>
   );
 };
@@ -132,7 +135,8 @@ export const PortfolioPage: React.FC = () => {
       const result = await apiService.getPortfolio(current);
       if (requestId === latestRequest.current) setData(result);
     } catch (err: any) {
-      if (requestId === latestRequest.current) setError(err?.response?.data?.error || 'No se pudo cargar la cartera de proyectos.');
+      // Sin respuesta del servidor (p. ej. el 429 que api.ts traduce) el mensaje viene en el propio error
+      if (requestId === latestRequest.current) setError(err?.response?.data?.error ?? err?.message ?? 'No se pudo cargar la cartera de proyectos.');
     } finally {
       if (requestId === latestRequest.current) setLoading(false);
     }
@@ -209,7 +213,23 @@ export const PortfolioPage: React.FC = () => {
         ? <Tag color="warning" icon={<ExclamationCircleOutlined />}>Datos incompletos</Tag>
         : money(value)
     },
-    { title: 'Costo real', dataIndex: 'real_cost', key: 'real_cost', align: 'right', onCell: financialSpan(false), render: money },
+    {
+      title: 'Costo real',
+      dataIndex: 'real_cost',
+      key: 'real_cost',
+      align: 'right',
+      onCell: financialSpan(false),
+      render: (value: number, row) => (
+        <Space size={6} wrap={false}>
+          {row.real_hours_source === 'projected' && (
+            <Tooltip title="Sin horas aprobadas: se usa el costo planificado">
+              <Tag color="warning" style={{ marginInlineEnd: 0 }}>estimado</Tag>
+            </Tooltip>
+          )}
+          {money(value)}
+        </Space>
+      )
+    },
     { title: 'Costo proyectado', dataIndex: 'projected_cost', key: 'projected_cost', align: 'right', onCell: financialSpan(false), render: money },
     {
       title: 'Utilidad proyectada',
@@ -234,7 +254,7 @@ export const PortfolioPage: React.FC = () => {
       dataIndex: 'pending_to_invoice_clp',
       key: 'pending_to_invoice_clp',
       align: 'right',
-      render: (value: number, row) => (isUnrealized(row) || row.financials_error ? <Text type="secondary">—</Text> : money(value))
+      render: (value: number, row) => (!isSaleRealized(row) || row.financials_error ? <Text type="secondary">—</Text> : money(value))
     }
   ];
 
@@ -273,7 +293,7 @@ export const PortfolioPage: React.FC = () => {
       key: 'sales_rep_name',
       render: (name: string, row) => (row.sales_rep_id === null ? <Text type="secondary">{name || UNASSIGNED}</Text> : name)
     },
-    { title: 'Proyectos (incl. en cotización)', dataIndex: 'projects', key: 'projects', align: 'right' },
+    { title: 'Proyectos', dataIndex: 'projects', key: 'projects', align: 'right' },
     { title: 'Venta', dataIndex: 'sale_price', key: 'sale_price', align: 'right', render: money }
   ];
 
@@ -282,6 +302,9 @@ export const PortfolioPage: React.FC = () => {
     if (!data) return <LoadingState tip="Cargando cartera de proyectos…" minHeight={320} />;
 
     const { totals } = data;
+    const hasActiveFilters = Object.keys(filters).length > 0;
+    // Los proyectos sin OK del cliente no suman al costo real total, así que tampoco cuentan en su aviso.
+    const estimatedCostProjects = data.rows.filter((row) => isSaleRealized(row) && !row.financials_error && row.real_hours_source === 'projected').length;
     return (
       <Spin spinning={loading}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -290,16 +313,16 @@ export const PortfolioPage: React.FC = () => {
               <KpiCard id="projects" title="Proyectos" value={totals.projects} note={ALL_PROJECTS_NOTE} format={formatSpanishNumber} />
             </Col>
             <Col xs={24} sm={12} lg={6}>
-              <KpiCard id="sale_price" title="Venta total" value={totals.sale_price} note={NOT_REALIZED_NOTE} />
+              <KpiCard id="sale_price" title="Venta total" value={totals.sale_price} note={REALIZED_ONLY_NOTE} />
             </Col>
             <Col xs={24} sm={12} lg={6}>
-              <KpiCard id="real_cost" title="Costo real" value={totals.real_cost} note={NOT_REALIZED_NOTE} />
+              <KpiCard id="real_cost" title="Costo real" value={totals.real_cost} note={REALIZED_ONLY_NOTE} extraNote={estimatedCostProjects > 0 ? estimatedCostNote(estimatedCostProjects) : undefined} />
             </Col>
             <Col xs={24} sm={12} lg={6}>
-              <KpiCard id="projected_cost" title="Costo proyectado" value={totals.projected_cost} note={NOT_REALIZED_NOTE} />
+              <KpiCard id="projected_cost" title="Costo proyectado" value={totals.projected_cost} note={REALIZED_ONLY_NOTE} />
             </Col>
             <Col xs={24} sm={12} lg={6}>
-              <KpiCard id="projected_profit" title="Utilidad proyectada" value={totals.projected_profit} note={NOT_REALIZED_NOTE} />
+              <KpiCard id="projected_profit" title="Utilidad proyectada" value={totals.projected_profit} note={REALIZED_ONLY_NOTE} />
             </Col>
             <Col xs={24} sm={12} lg={6}>
               <KpiCard id="invoiced" title="Facturado" value={totals.invoiced_clp} note={ALL_PROJECTS_NOTE} />
@@ -308,13 +331,13 @@ export const PortfolioPage: React.FC = () => {
               <KpiCard id="collected" title="Cobrado" value={totals.collected_clp} note={ALL_PROJECTS_NOTE} />
             </Col>
             <Col xs={24} sm={12} lg={6}>
-              <KpiCard id="pending_to_invoice" title="Por facturar" value={totals.pending_to_invoice_clp} note={NOT_REALIZED_NOTE} />
+              <KpiCard id="pending_to_invoice" title="Por facturar" value={totals.pending_to_invoice_clp} note={REALIZED_ONLY_NOTE} />
             </Col>
           </Row>
 
           <Card title="Proyectos" styles={{ body: { padding: 16 } }} style={{ borderColor: token.colorBorderSecondary }}>
             <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 14 }}>
-              Los proyectos perdidos o cancelados se muestran atenuados y no suman a los totales de venta, costos ni por facturar.
+              Los proyectos en cotización, perdidos o cancelados se muestran atenuados y no suman a los totales de venta, costos ni por facturar.
             </Text>
             <Table
               dataSource={data.rows}
@@ -323,8 +346,8 @@ export const PortfolioPage: React.FC = () => {
               size="middle"
               pagination={{ pageSize: 10, hideOnSinglePage: true }}
               scroll={{ x: 1500 }}
-              onRow={(row) => (isUnrealized(row) ? { style: { opacity: 0.6 } } : {})}
-              locale={{ emptyText: <EmptyState description="No hay proyectos en la cartera con estos filtros" /> }}
+              onRow={(row) => (isSaleRealized(row) ? {} : { style: { opacity: 0.6 } })}
+              locale={{ emptyText: <EmptyState description={hasActiveFilters ? 'No hay proyectos en la cartera con estos filtros' : 'Aún no hay proyectos'} /> }}
             />
           </Card>
 
@@ -348,7 +371,7 @@ export const PortfolioPage: React.FC = () => {
             <Col xs={24} lg={10}>
               <Card data-testid="sales-by-rep" title="Ventas por comercial" styles={{ body: { padding: 16 } }} style={{ borderColor: token.colorBorderSecondary, height: '100%' }}>
                 <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 14 }}>
-                  {NOT_REALIZED_NOTE}.
+                  {REALIZED_ONLY_NOTE}.
                 </Text>
                 <Table
                   dataSource={data.sales_by_rep}
