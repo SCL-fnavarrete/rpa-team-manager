@@ -54,6 +54,9 @@ export const PMOControllerView: React.FC<PMOControllerViewProps> = ({
     aging_portfolio
   } = data;
 
+  // El costo, el avance de costo y el CPI solo llegan para team_lead: sin ellos la matriz concilia avance físico y facturación
+  const hasCostData = triple_conciliation.some((row) => typeof row.cost_consumed_pct === 'number');
+
   const conciliationColumns = [
     {
       title: 'Proyecto',
@@ -75,19 +78,21 @@ export const PMOControllerView: React.FC<PMOControllerViewProps> = ({
       )
     },
     {
-      title: 'Triple Avance (% Físico vs Costo vs Factura)',
+      title: hasCostData ? 'Triple Avance (% Físico vs Costo vs Factura)' : 'Avance (% Físico vs Factura)',
       key: 'advances',
       width: 280,
       render: (_: unknown, record: any) => (
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
             <span>Físico: <b>{record.physical_progress_pct}%</b></span>
-            <span>Costo: <b>{record.cost_consumed_pct}%</b></span>
+            {typeof record.cost_consumed_pct === 'number' && <span>Costo: <b>{record.cost_consumed_pct}%</b></span>}
             <span>Facturado: <b>{record.billed_pct}%</b></span>
           </div>
           <div style={{ display: 'flex', gap: 4 }}>
             <Progress percent={record.physical_progress_pct} size="small" showInfo={false} strokeColor={token.colorPrimary} />
-            <Progress percent={record.cost_consumed_pct} size="small" showInfo={false} strokeColor={record.cost_consumed_pct > record.physical_progress_pct + 15 ? token.colorError : token.colorWarning} />
+            {typeof record.cost_consumed_pct === 'number' && (
+              <Progress percent={record.cost_consumed_pct} size="small" showInfo={false} strokeColor={record.cost_consumed_pct > record.physical_progress_pct + 15 ? token.colorError : token.colorWarning} />
+            )}
             <Progress percent={record.billed_pct} size="small" showInfo={false} strokeColor={token.colorSuccess} />
           </div>
         </Space>
@@ -128,21 +133,23 @@ export const PMOControllerView: React.FC<PMOControllerViewProps> = ({
       }
     },
     {
-      title: 'Montos Clave (Venta / Costo / Facturado)',
+      title: hasCostData ? 'Montos Clave (Venta / Costo / Facturado)' : 'Montos Clave (Venta / Facturado)',
       key: 'amounts',
       render: (_: unknown, record: any) => (
         <div style={{ fontSize: 12 }}>
           <div>Venta: {formatCLP(record.sale_price_clp)}</div>
-          <div style={{ color: record.cost_consumed_pct > 100 ? token.colorError : token.colorTextSecondary }}>
-            Costo: {formatCLP(record.real_cost_clp)}
-          </div>
+          {typeof record.real_cost_clp === 'number' && (
+            <div style={{ color: record.cost_consumed_pct > 100 ? token.colorError : token.colorTextSecondary }}>
+              Costo: {formatCLP(record.real_cost_clp)}
+            </div>
+          )}
           <div style={{ color: token.colorSuccess }}>
             Facturado: {formatCLP(record.invoiced_clp)}
           </div>
         </div>
       )
     }
-  ];
+  ].filter((column) => hasCostData || column.key !== 'cpi');
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -247,14 +254,20 @@ export const PMOControllerView: React.FC<PMOControllerViewProps> = ({
         title={
           <Space>
             <AuditOutlined style={{ color: token.colorPrimary }} />
-            <span>Matriz de Triple Conciliación de Proyectos (EVM / Físico vs Costo vs Facturación)</span>
+            <span>
+              {hasCostData
+                ? 'Matriz de Triple Conciliación de Proyectos (EVM / Físico vs Costo vs Facturación)'
+                : 'Conciliación de Avance Físico vs Facturación'}
+            </span>
           </Space>
         }
         styles={{ body: { padding: 16 } }}
         style={{ borderColor: token.colorBorderSecondary }}
       >
         <Text type="secondary" style={{ fontSize: 13, display: 'block', marginBottom: 14 }}>
-          Control preventivo de descalces: detecta a tiempo proyectos con consumo de costo acelerado sin respaldo de avance físico, o proyectos entregados sin emitir facturas.
+          {hasCostData
+            ? 'Control preventivo de descalces: detecta a tiempo proyectos con consumo de costo acelerado sin respaldo de avance físico, o proyectos entregados sin emitir facturas.'
+            : 'Control preventivo de descalces: detecta a tiempo proyectos entregados sin emitir facturas.'}
         </Text>
         <Table
           dataSource={triple_conciliation}

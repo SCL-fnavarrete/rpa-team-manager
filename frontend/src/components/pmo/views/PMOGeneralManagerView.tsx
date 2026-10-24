@@ -58,6 +58,11 @@ export const PMOGeneralManagerView: React.FC<PMOGeneralManagerViewProps> = ({
     team_utilization_summary
   } = data;
 
+  // Costos, utilidad y margen solo llegan para team_lead: sin ellos se omiten esas tarjetas y columnas
+  const { avg_margin_pct: avgMarginPct, total_gross_profit_clp: grossProfitClp } = consolidated_pnl;
+  const showCostColumn = top_risk_projects.some((project) => typeof project.real_cost_clp === 'number');
+  const kpiColumnSpan = typeof avgMarginPct === 'number' ? 6 : 8;
+
   const riskTableColumns = [
     {
       title: 'Proyecto',
@@ -150,13 +155,13 @@ export const PMOGeneralManagerView: React.FC<PMOGeneralManagerViewProps> = ({
         </Space>
       )
     }
-  ];
+  ].filter((column) => showCostColumn || column.key !== 'cost');
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       {/* 1. KPIs Directivos de Alto Nivel */}
       <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={kpiColumnSpan}>
           <Card
             styles={{ body: { padding: 18 } }}
             style={{
@@ -177,33 +182,37 @@ export const PMOGeneralManagerView: React.FC<PMOGeneralManagerViewProps> = ({
           </Card>
         </Col>
 
-        <Col xs={24} sm={12} lg={6}>
-          <Card
-            styles={{ body: { padding: 18 } }}
-            style={{
-              borderColor: token.colorBorderSecondary,
-              background: isDark ? 'rgba(255, 255, 255, 0.02)' : token.colorBgContainer
-            }}
-          >
-            <Statistic
-              title="Margen Operacional Consolidado"
-              value={consolidated_pnl.avg_margin_pct}
-              suffix="%"
-              formatter={(val) => formatPercent(Number(val))}
-              prefix={consolidated_pnl.avg_margin_pct >= 25 ? <ArrowUpOutlined style={{ color: token.colorSuccess }} /> : <ArrowDownOutlined style={{ color: token.colorWarning }} />}
-              valueStyle={{
-                fontSize: 24,
-                fontWeight: 700,
-                color: consolidated_pnl.avg_margin_pct >= 25 ? token.colorSuccess : token.colorWarning
+        {typeof avgMarginPct === 'number' && (
+          <Col xs={24} sm={12} lg={kpiColumnSpan}>
+            <Card
+              styles={{ body: { padding: 18 } }}
+              style={{
+                borderColor: token.colorBorderSecondary,
+                background: isDark ? 'rgba(255, 255, 255, 0.02)' : token.colorBgContainer
               }}
-            />
-            <div style={{ marginTop: 8, fontSize: 12, color: token.colorTextSecondary }}>
-              Utilidad bruta: <Text strong>{formatCLP(consolidated_pnl.total_gross_profit_clp)}</Text>
-            </div>
-          </Card>
-        </Col>
+            >
+              <Statistic
+                title="Margen Operacional Consolidado"
+                value={avgMarginPct}
+                suffix="%"
+                formatter={(val) => formatPercent(Number(val))}
+                prefix={avgMarginPct >= 25 ? <ArrowUpOutlined style={{ color: token.colorSuccess }} /> : <ArrowDownOutlined style={{ color: token.colorWarning }} />}
+                valueStyle={{
+                  fontSize: 24,
+                  fontWeight: 700,
+                  color: avgMarginPct >= 25 ? token.colorSuccess : token.colorWarning
+                }}
+              />
+              {typeof grossProfitClp === 'number' && (
+                <div style={{ marginTop: 8, fontSize: 12, color: token.colorTextSecondary }}>
+                  Utilidad bruta: <Text strong>{formatCLP(grossProfitClp)}</Text>
+                </div>
+              )}
+            </Card>
+          </Col>
+        )}
 
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={kpiColumnSpan}>
           <Card
             styles={{ body: { padding: 18 } }}
             style={{
@@ -234,7 +243,7 @@ export const PMOGeneralManagerView: React.FC<PMOGeneralManagerViewProps> = ({
           </Card>
         </Col>
 
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={kpiColumnSpan}>
           <Card
             styles={{ body: { padding: 18 } }}
             style={{

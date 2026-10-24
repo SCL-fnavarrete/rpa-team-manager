@@ -2,9 +2,10 @@ import { Request, Response } from 'express';
 import { db } from '../database/database';
 import { logger } from '../utils/logger';
 import { activityLogService } from '../services/activityLogService';
-import { financeService, Currency } from '../services/financeService';
+import { financeService, Currency, ProjectFinancials } from '../services/financeService';
 import { billingService } from '../services/billingService';
 import { timesheetService } from '../services/timesheetService';
+import { isRealizedSale } from '../services/portfolioService';
 
 interface AuthenticatedRequest extends Request {
     user?: {
@@ -14,6 +15,61 @@ interface AuthenticatedRequest extends Request {
         full_name: string;
     };
 }
+
+type SuiteRow = Record<string, unknown>;
+
+/** Respuesta de GET /pmo/executive-suite; solo tipa las secciones que stripFinancials recorre. */
+export interface ExecutiveSuiteResponse {
+    general_manager: { consolidated_pnl: SuiteRow; top_risk_projects: SuiteRow[] } & SuiteRow;
+    commercial: { scope_creep_alerts: SuiteRow[] } & SuiteRow;
+    controller: { triple_conciliation: SuiteRow[] } & SuiteRow;
+}
+
+/** Decisión de producto: sueldos, HH, costos y márgenes solo los ve team_lead (Facturación ve hitos y facturas). */
+const FINANCIAL_ROLES = ['team_lead'];
+const canSeeFinancials = (role: string | undefined): boolean => role !== undefined && FINANCIAL_ROLES.includes(role);
+
+const omit = (row: SuiteRow, keys: string[]): SuiteRow =>
+    Object.fromEntries(Object.entries(row).filter(([key]) => !keys.includes(key)));
+
+/**
+ * Quita de la respuesta del Centro PMO ejecutivo todo costo, utilidad, margen y CPI (derivado del costo) cuando
+ * el rol no es team_lead; un rol ausente o desconocido se trata como sin permiso. No modifica el objeto recibido.
+ * Se conserva lo de cobranza: hitos, facturas, cartera vencida, aging e imputación por centro de costo (reparte el
+ * monto de venta del proyecto, no es costo interno), y las alertas, riesgos, scope creep e imputaciones faltantes.
+ */
+export const stripFinancials = (data: ExecutiveSuiteResponse, role: string | undefined): ExecutiveSuiteResponse => {
+    if (canSeeFinancials(role)) return data;
+    return {
+        general_manager: {
+            ...data.general_manager,
+            consolidated_pnl: omit(data.general_manager.consolidated_pnl, ['total_real_cost_clp', 'total_gross_profit_clp', 'avg_margin_pct']),
+            top_risk_projects: data.general_manager.top_risk_projects.map(project =>
+                omit(project, ['cost_variance_clp', 'real_cost_clp', 'budgeted_cost_clp'])
+            )
+        },
+        commercial: {
+            ...omit(data.commercial, ['margin_variance']),
+            scope_creep_alerts: data.commercial.scope_creep_alerts.map(alert => omit(alert, ['overrun_cost_clp']))
+        },
+        controller: {
+            ...data.controller,
+            triple_conciliation: data.controller.triple_conciliation.map(row =>
+                omit(row, ['cost_consumed_pct', 'cpi', 'budgeted_cost_clp', 'real_cost_clp'])
+            )
+        }
+    };
+};
+
+/** Diagnóstico de un proyecto en alerta; el monto del sobrecosto solo se escribe para quien puede ver costos. */
+const describeCriticalReason = (costVarianceCLP: number, schedVar: number, riskLevel: string, showAmounts: boolean): string => {
+    const overrun = showAmounts ? `Sobrecosto de $${Math.round(costVarianceCLP).toLocaleString('es-CL')}` : 'Sobrecosto';
+    if (costVarianceCLP > 0 && schedVar > 5) return `${overrun} y retraso de ${schedVar} días`;
+    if (costVarianceCLP > 0) return `${overrun} sobre presupuesto`;
+    if (schedVar > 5) return `Retraso crítico de ${schedVar} días frente a la fecha comprometida`;
+    if (riskLevel === 'critical' || riskLevel === 'high') return `Alerta de riesgo operativo ${riskLevel.toUpperCase()}`;
+    return 'En curso regular';
+};
 
 export class PMOController {
     // GET /api/pmo/dashboard - Main PMO dashboard data
@@ -1282,31 +1338,30 @@ export class PMOController {
             await billingService.evaluateTriggers();
             await billingService.evaluateOverdue();
 
-            // 1. Proyectos activos y métricas PMO
-            const projects = await db.query(`
+            // 1. Proyectos y avance PMO manual (project_pmo_metrics solo aporta avance, atraso, riesgo y satisfacción;
+            // los montos salen siempre de financeService). Solo cuentan los de venta realizada, como en la cartera.
+            const projects = (await db.query(`
                 SELECT 
-                    p.id, p.name, p.status, p.priority, p.end_date, p.start_date, p.budget,
+                    p.id, p.name, p.status, p.commercial_stage, p.priority, p.end_date, p.start_date,
                     c.id as client_id, c.name as client_name,
                     u.id as assigned_to_id, u.full_name as assigned_to_name,
-                    pm.completion_percentage, pm.schedule_variance_days, pm.cost_variance_percentage,
-                    pm.risk_level, pm.planned_budget, pm.actual_cost, pm.planned_hours, pm.actual_hours,
+                    pm.completion_percentage, pm.schedule_variance_days, pm.risk_level,
                     pm.client_satisfaction_score
                 FROM projects p
                 LEFT JOIN project_pmo_metrics pm ON p.id = pm.project_id
                 LEFT JOIN clients c ON p.client_id = c.id
                 LEFT JOIN users u ON p.assigned_to = u.id
-                WHERE p.status != 'cancelled'
                 ORDER BY p.name ASC
-            `);
+            `)).filter(isRealizedSale);
 
             // 2. Financials calculados en vivo por financeService
-            const financialsMap = new Map<number, any>();
+            const financialsMap = new Map<number, ProjectFinancials | null>();
             await Promise.all(
                 projects.map(async (p: any) => {
                     try {
-                        const fin = await financeService.calculateProjectFinancials(p.id);
-                        financialsMap.set(p.id, fin);
-                    } catch {
+                        financialsMap.set(p.id, await financeService.calculateProjectFinancials(p.id));
+                    } catch (error) {
+                        logger.error(`PMO Executive Suite: no se pudieron calcular las finanzas del proyecto ${p.id}:`, error);
                         financialsMap.set(p.id, null);
                     }
                 })
@@ -1326,9 +1381,9 @@ export class PMOController {
 
             const analyzedProjects = projects.map((p: any) => {
                 const fin = financialsMap.get(p.id);
-                const salePrice = fin && fin.sale_price > 0 ? fin.sale_price : Number(p.budget || p.planned_budget || 0);
-                const realCost = fin && fin.real_cost > 0 ? fin.real_cost : Number(p.actual_cost || 0);
-                const budgetedCost = fin && fin.planned_cost > 0 ? fin.planned_cost : Number(p.planned_budget || p.budget || 0);
+                const salePrice = fin?.sale_price ?? 0;
+                const realCost = fin?.real_cost ?? 0;
+                const budgetedCost = fin?.planned_cost ?? 0;
                 const costVarianceCLP = Math.max(0, realCost - budgetedCost);
                 const schedVar = Number(p.schedule_variance_days || 0);
                 const riskLevel = p.risk_level || 'low';
@@ -1341,21 +1396,8 @@ export class PMOController {
                 else if (healthStatus === 'warning') warning_count++;
                 else healthy_count++;
 
-                if (salePrice > 0) {
-                    total_sold_clp += salePrice;
-                    total_real_cost_clp += realCost;
-                }
-
-                let criticalReason = 'En curso regular';
-                if (costVarianceCLP > 0 && schedVar > 5) {
-                    criticalReason = `Sobrecosto de $${Math.round(costVarianceCLP).toLocaleString('es-CL')} y retraso de ${schedVar} días`;
-                } else if (costVarianceCLP > 0) {
-                    criticalReason = `Sobrecosto de $${Math.round(costVarianceCLP).toLocaleString('es-CL')} sobre presupuesto`;
-                } else if (schedVar > 5) {
-                    criticalReason = `Retraso crítico de ${schedVar} días frente a la fecha comprometida`;
-                } else if (riskLevel === 'critical' || riskLevel === 'high') {
-                    criticalReason = `Alerta de riesgo operativo ${riskLevel.toUpperCase()}`;
-                }
+                total_sold_clp += salePrice;
+                total_real_cost_clp += realCost;
 
                 const daysToDeadline = p.end_date
                     ? Math.round((new Date(p.end_date).getTime() - Date.now()) / (1000 * 3600 * 24))
@@ -1375,7 +1417,7 @@ export class PMOController {
                     sale_price_clp: salePrice,
                     progress_pct: Number(p.completion_percentage || 0),
                     days_to_deadline: daysToDeadline,
-                    critical_reason: criticalReason,
+                    critical_reason: describeCriticalReason(costVarianceCLP, schedVar, riskLevel, canSeeFinancials(req.user?.role)),
                     risk_level: riskLevel,
                     satisfaction_score: p.client_satisfaction_score
                 };
@@ -1451,7 +1493,7 @@ export class PMOController {
                 ORDER BY pq.created_at DESC
             `);
 
-            const margin_variance = approvedQuotes.map((q: any) => {
+            const margin_variance = approvedQuotes.filter((q: any) => financialsMap.has(q.project_id)).map((q: any) => {
                 const fin = financialsMap.get(q.project_id);
                 const quotedMargin = Number(q.margin_percent || 0);
                 const realMargin = fin ? Number(fin.real_margin_percentage || 0) : 0;
@@ -1678,7 +1720,7 @@ export class PMOController {
 
             const total_overdue_clp = overdue_30_clp + overdue_60_clp;
 
-            res.json({
+            const suite: ExecutiveSuiteResponse = {
                 general_manager: {
                     consolidated_pnl: {
                         total_sold_clp: Math.round(total_sold_clp),
@@ -1742,7 +1784,9 @@ export class PMOController {
                         }))
                     }
                 }
-            });
+            };
+
+            res.json(stripFinancials(suite, req.user?.role));
 
         } catch (error) {
             logger.error('Get PMO Executive Suite error:', error);

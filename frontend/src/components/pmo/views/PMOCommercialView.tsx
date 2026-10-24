@@ -364,11 +364,14 @@ export const PMOCommercialView: React.FC<PMOCommercialViewProps> = ({
                     Cliente: {alert.client_name} · Cotizadas: {alert.quoted_hours} hrs · Reales: {alert.real_hours} hrs
                   </Text>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
-                    <Text style={{ fontSize: 13, color: token.colorError }}>
-                      Costo HH adicional estimado: <Text strong>{formatCLP(alert.overrun_cost_clp)}</Text>
-                    </Text>
+                    {typeof alert.overrun_cost_clp === 'number' && (
+                      <Text style={{ fontSize: 13, color: token.colorError }}>
+                        Costo HH adicional estimado: <Text strong>{formatCLP(alert.overrun_cost_clp)}</Text>
+                      </Text>
+                    )}
                     <Button
                       size="small"
+                      style={{ marginInlineStart: 'auto' }}
                       onClick={() => navigate(`/projects/${alert.project_id}?tab=commercial`)}
                     >
                       Ver Cotización / CR
@@ -381,26 +384,28 @@ export const PMOCommercialView: React.FC<PMOCommercialViewProps> = ({
         </Card>
       )}
 
-      {/* 4. Comparativa de Margen (Vendido vs Real) */}
-      <Card
-        title={
-          <Space>
-            <RiseOutlined style={{ color: token.colorPrimary }} />
-            <span>Control de Margen Comercial: Cotización Inicial vs Ejecución Real</span>
-          </Space>
-        }
-        styles={{ body: { padding: 16 } }}
-        style={{ borderColor: token.colorBorderSecondary }}
-      >
-        <Table
-          dataSource={margin_variance}
-          columns={marginColumns}
-          rowKey="project_id"
-          pagination={{ pageSize: 6 }}
-          size="middle"
-          scroll={{ x: 750 }}
-        />
-      </Card>
+      {/* 4. Comparativa de Margen (Vendido vs Real): solo llega para team_lead */}
+      {margin_variance && (
+        <Card
+          title={
+            <Space>
+              <RiseOutlined style={{ color: token.colorPrimary }} />
+              <span>Control de Margen Comercial: Cotización Inicial vs Ejecución Real</span>
+            </Space>
+          }
+          styles={{ body: { padding: 16 } }}
+          style={{ borderColor: token.colorBorderSecondary }}
+        >
+          <Table
+            dataSource={margin_variance}
+            columns={marginColumns}
+            rowKey="project_id"
+            pagination={{ pageSize: 6 }}
+            size="middle"
+            scroll={{ x: 750 }}
+          />
+        </Card>
+      )}
     </div>
   );
 };

@@ -1,11 +1,13 @@
 export type PMORolePerspective = 'general_manager' | 'commercial' | 'controller' | 'operations';
 
+// Los campos opcionales de costo, utilidad y margen solo los envía el backend a team_lead
+// (rpa_operations y billing no los reciben): las vistas deben ocultar lo que no llega.
 export interface PMOGeneralManagerData {
   consolidated_pnl: {
     total_sold_clp: number;
-    total_real_cost_clp: number;
-    total_gross_profit_clp: number;
-    avg_margin_pct: number;
+    total_real_cost_clp?: number;
+    total_gross_profit_clp?: number;
+    avg_margin_pct?: number;
     active_projects_count: number;
     total_projects_count: number;
     billable_hours_ratio: number;
@@ -26,9 +28,9 @@ export interface PMOGeneralManagerData {
     assigned_to_name: string;
     project_health_status: 'healthy' | 'warning' | 'critical';
     schedule_variance_days: number;
-    cost_variance_clp: number;
-    real_cost_clp: number;
-    budgeted_cost_clp: number;
+    cost_variance_clp?: number;
+    real_cost_clp?: number;
+    budgeted_cost_clp?: number;
     progress_pct: number;
     days_to_deadline: number | null;
     critical_reason: string;
@@ -61,7 +63,7 @@ export interface PMOCommercialData {
     days_since_completed: number;
   }>;
   total_unlocked_revenue_clp: number;
-  margin_variance: Array<{
+  margin_variance?: Array<{
     project_id: number;
     project_name: string;
     client_name: string;
@@ -82,7 +84,7 @@ export interface PMOCommercialData {
     quoted_hours: number;
     real_hours: number;
     overrun_hours: number;
-    overrun_cost_clp: number;
+    overrun_cost_clp?: number;
     severity: 'warning' | 'critical';
   }>;
   client_scorecards: Array<{
@@ -101,13 +103,13 @@ export interface PMOControllerData {
     project_name: string;
     client_name: string;
     physical_progress_pct: number;
-    cost_consumed_pct: number;
+    cost_consumed_pct?: number;
     billed_pct: number;
-    cpi: number;
+    cpi?: number;
     deviation_flag: 'healthy' | 'cost_overrun' | 'unbilled_work' | 'critical_desynchronization';
     sale_price_clp: number;
-    budgeted_cost_clp: number;
-    real_cost_clp: number;
+    budgeted_cost_clp?: number;
+    real_cost_clp?: number;
     invoiced_clp: number;
     paid_clp: number;
   }>;

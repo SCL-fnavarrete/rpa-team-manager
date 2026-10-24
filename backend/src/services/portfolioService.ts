@@ -38,8 +38,9 @@ const EXECUTION_STATUSES = ['active', 'completed'];
  * completado: "Crear desde cotización" (POST /projects/from-quote) lo crea activo sin fijar la etapa y la BD le
  * pone 'quoting' por defecto, mientras que una cotización real nace 'on_hold' (createProject y scoping) y
  * updateProject impide activarla sin la aprobación del cliente. Los internos nacen 'approved' en createProject.
+ * Es el criterio único de venta realizada: la cartera y el Centro PMO ejecutivo lo comparten para que sus cifras cuadren.
  */
-const isRealizedSale = (row: PortfolioRow): boolean =>
+export const isRealizedSale = (row: { status: string; commercial_stage: string }): boolean =>
     row.status !== 'cancelled'
     && (row.commercial_stage === 'approved' || (row.commercial_stage === 'quoting' && EXECUTION_STATUSES.includes(row.status)));
 
