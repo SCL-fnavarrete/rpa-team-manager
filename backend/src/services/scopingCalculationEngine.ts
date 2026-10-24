@@ -5,7 +5,26 @@
  * 2. "CL - FACTURAS PROVEEDORES - Esfuerzo v0.3.xlsx" (Cubicación real de equipo por semanas y roles)
  */
 
-export type DataInputType = 
+import { ValidationError } from '../utils/errors';
+
+/**
+ * Valores aceptados por cada entrada categórica. Fuente única: el esquema de validación
+ * de la API (validation/schemas.ts) y la validación del propio motor leen de aquí.
+ */
+export const SCOPING_OPTIONS = {
+  data_input_type: ['digital_structured', 'digital_unstructured', 'non_digital_structured', 'non_digital_unstructured'],
+  rule_based_level: ['rules_exclusive', 'rules_mostly', 'some_subjectivity', 'mostly_subjective', 'purely_subjective'],
+  stability: ['no_change', 'very_small', 'some_change', 'medium_change', 'significant_change'],
+  frequency: ['daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'annual'],
+  peak_period: ['regular_peak', 'rare_predictable', 'rare_unpredictable', 'no_peaks'],
+  process_steps_count: ['lte_10', '10_15', '15_25', '25_40', 'gt_40'],
+  decision_complexity: ['linear', 'simple_yes_no', 'complex'],
+  applications_count: ['1_app', '2_3_apps', '4_5_apps', 'gt_5_apps'],
+  structured_data_pct: ['gte_80', '60_80', '40_60', 'lt_40'],
+  currency: ['CLP', 'USD', 'UF']
+} as const;
+
+export type DataInputType =
   | 'digital_structured'
   | 'digital_unstructured'
   | 'non_digital_structured'
@@ -73,6 +92,15 @@ export type ViabilityStatus =
 export type EffortLevel = 'low' | 'medium' | 'high';
 export type BenefitLevel = 'low' | 'medium' | 'medium_high' | 'high';
 
+// Calibración manual de horas por rol (LP, CRPA, AR, ADV) y semanas; lo que falte usa el nivel de esfuerzo del motor
+export interface CustomHours {
+  lp?: number;
+  crpa?: number;
+  ar?: number;
+  adv?: number;
+  weeks?: number;
+}
+
 export interface ScopingInputs {
   data_input_type: DataInputType;
   rule_based_level: RuleBasedLevel;
@@ -99,13 +127,7 @@ export interface ScopingInputs {
   hourly_labor_cost?: number; // Costo hora analista del cliente
   target_hourly_rate?: number; // Tarifa venta hora del equipo RPA
   internal_cost_rate?: number; // Costo hora interno del equipo RPA
-  custom_hours?: {
-    lp?: number;
-    crpa?: number;
-    ar?: number;
-    adv?: number;
-    weeks?: number;
-  };
+  custom_hours?: CustomHours;
 }
 
 export interface ProjectPhaseEstimate {
@@ -237,9 +259,81 @@ export class ScopingCalculationEngine {
   };
 
   /**
+   * Tarifas por defecto de una moneda (copia: quien la pida no puede alterar la tabla interna)
+   */
+  public static getDefaultRates(currency: 'CLP' | 'USD' | 'UF'): { labor: number; target: number; internal: number } {
+    return { ...this.DEFAULT_RATES[currency] };
+  }
+
+  /**
+   * Rechaza entradas que producirían NaN, precios negativos o errores internos, con mensajes
+   * en español. Es la última barrera: la API ya valida el cuerpo con validation/schemas.ts.
+   */
+  private static validateInputs(inputs: ScopingInputs): void {
+    if (!inputs || typeof inputs !== 'object') {
+      throw new ValidationError('Las entradas del levantamiento no son válidas');
+    }
+
+    const options = (key: keyof typeof SCOPING_OPTIONS, value: unknown, message: string, optional = false): void => {
+      if (optional && value === undefined) return;
+      if (!(SCOPING_OPTIONS[key] as readonly unknown[]).includes(value)) throw new ValidationError(message);
+    };
+    const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+    const positive = (value: unknown, message: string): void => {
+      if (!finite(value) || value <= 0) throw new ValidationError(message);
+    };
+    const nonNegative = (value: unknown, message: string, optional = true): void => {
+      if (optional && (value === undefined || value === null)) return;
+      if (!finite(value) || value < 0) throw new ValidationError(message);
+    };
+    const flag = (value: unknown, message: string): void => {
+      if (typeof value !== 'boolean') throw new ValidationError(message);
+    };
+
+    options('data_input_type', inputs.data_input_type, 'El tipo de entrada de datos no es válido');
+    options('rule_based_level', inputs.rule_based_level, 'El nivel de reglas del proceso no es válido');
+    options('stability', inputs.process_stability, 'La estabilidad del proceso no es válida');
+    options('stability', inputs.application_stability, 'La estabilidad de las aplicaciones no es válida');
+    options('frequency', inputs.frequency, 'La frecuencia del proceso no es válida');
+    positive(inputs.volume_per_frequency, 'El volumen por frecuencia debe ser un número mayor que cero');
+    positive(inputs.aht_minutes, 'El tiempo promedio por ejecución (AHT) debe ser un número mayor que cero');
+    nonNegative(inputs.current_ftes, 'Los colaboradores actuales (FTEs) deben ser un número mayor o igual a cero');
+    nonNegative(inputs.error_rate_pct, 'La tasa de error debe ser un número mayor o igual a cero');
+    options('peak_period', inputs.peak_period, 'El periodo punta no es válido', true);
+    options('process_steps_count', inputs.process_steps_count, 'La cantidad de pasos del proceso no es válida');
+    options('decision_complexity', inputs.decision_complexity, 'La complejidad de las decisiones no es válida');
+    options('applications_count', inputs.applications_count, 'La cantidad de aplicaciones no es válida');
+    flag(inputs.uses_vdi, 'El indicador de VDI debe ser verdadero o falso');
+    flag(inputs.requires_ocr, 'El indicador de OCR debe ser verdadero o falso');
+    options('structured_data_pct', inputs.structured_data_pct, 'El porcentaje de datos estructurados no es válido');
+    nonNegative(inputs.exception_rate_pct, 'La tasa de excepciones debe ser un número mayor o igual a cero');
+    options('currency', inputs.currency, 'La moneda debe ser CLP, USD o UF', true);
+    nonNegative(inputs.hourly_labor_cost, 'El costo hora del analista del cliente debe ser un número mayor o igual a cero');
+    nonNegative(inputs.target_hourly_rate, 'La tarifa de venta por hora debe ser un número mayor o igual a cero');
+    nonNegative(inputs.internal_cost_rate, 'El costo interno por hora debe ser un número mayor o igual a cero');
+
+    if (inputs.custom_hours !== undefined) {
+      const custom = inputs.custom_hours as unknown as Record<string, unknown> | null;
+      if (custom === null || typeof custom !== 'object') {
+        throw new ValidationError('Las horas calibradas deben enviarse como un objeto');
+      }
+      for (const role of ['lp', 'crpa', 'ar', 'adv'] as const) {
+        if (custom[role] !== undefined) {
+          nonNegative(custom[role], `Las horas calibradas del rol ${role.toUpperCase()} deben ser un número mayor o igual a cero`, false);
+        }
+      }
+      if (custom.weeks !== undefined && (!finite(custom.weeks) || custom.weeks < 1)) {
+        throw new ValidationError('Las semanas calibradas deben ser un número mayor o igual a 1');
+      }
+    }
+  }
+
+  /**
    * Ejecuta el cálculo completo del levantamiento
    */
   public static calculate(inputs: ScopingInputs): ScopingCalculationResult {
+    this.validateInputs(inputs);
+
     const blockers: string[] = [];
     const recommendations: string[] = [];
     const currency = inputs.currency || 'CLP';

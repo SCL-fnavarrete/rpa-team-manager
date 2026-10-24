@@ -1,13 +1,17 @@
-import { DatabaseManager } from '../database/database';
-import { 
-  ScopingCalculationEngine, 
-  ScopingInputs, 
-  ScopingCalculationResult 
+import { db } from '../database/database';
+import {
+  ScopingCalculationEngine,
+  ScopingInputs,
+  ScopingCalculationResult,
+  CustomHours
 } from './scopingCalculationEngine';
 import { RPA_ARCHETYPES, RPAArchetype } from '../constants/rpaArchetypes';
+import { activityLogService } from './activityLogService';
+import { UserRole } from '../types/auth';
+import { APIError, AuthorizationError, ConflictError } from '../utils/errors';
 import { logger } from '../utils/logger';
 
-export interface ScopingRecord extends ScopingInputs {
+export interface ScopingRecord extends Omit<ScopingInputs, 'custom_hours'> {
   id: number;
   code: string;
   client_name: string;
@@ -58,17 +62,119 @@ export interface ScopingRecord extends ScopingInputs {
   status: 'draft' | 'sent_to_client' | 'approved' | 'rejected' | 'converted_to_project';
   converted_project_id?: number | null;
 
+  // Calibración manual persistida; null = el motor usa los niveles de esfuerzo
+  custom_hours: CustomHours | null;
+
   // Campos desglosados en tiempo de ejecución
   calculation?: ScopingCalculationResult;
 }
 
-export class ScopingService {
-  private db: DatabaseManager;
+// Entradas aceptadas por el cálculo en memoria; custom_hours null/ausente = sin calibración manual
+export type ScopingDraftInputs = Omit<ScopingInputs, 'custom_hours'> & { custom_hours?: CustomHours | null };
+export type ScopingCalculationDraft = ScopingCalculationResult & { custom_hours: CustomHours | null };
 
-  constructor() {
-    this.db = DatabaseManager.getInstance();
+export interface ScopingActor {
+  id: number;
+  role: UserRole;
+}
+
+type ScopingStatus = ScopingRecord['status'];
+type ColumnValue = string | number | null;
+
+// Cuerpo de la solicitud fusionado con el registro guardado, listo para calcular y persistir
+interface ResolvedScoping {
+  details: {
+    client_name: string;
+    client_contact: string | null;
+    client_email: string | null;
+    process_name: string;
+    business_unit: string | null;
+    process_archetype: string;
+    applications_detail: string | null;
+    assumptions: string | null;
+    exclusions: string | null;
+    notes: string | null;
+    status: ScopingStatus;
+  };
+  inputs: ScopingInputs;
+  customHours: CustomHours | null;
+}
+
+// Decisión 7: costo interno y margen solo los ve team_lead. Tarifa de venta, precio, ROI y payback los ven todos.
+const INTERNAL_COST_FIELDS = ['internal_cost_rate', 'project_internal_cost', 'projected_margin_pct'] as const;
+const CUSTOM_HOURS_KEYS = ['lp', 'crpa', 'ar', 'adv', 'weeks'] as const;
+
+// Plantilla del ciclo de vida (project_phase_templates) que representa cada una de las 5 fases del cálculo
+const PHASE_TEMPLATE_NAMES = [
+  'PDD Creation',
+  'Development - Core Logic',
+  'Integration Testing',
+  'UAT Execution',
+  'Production Deployment'
+];
+
+// Columnas del tablero Kanban de un proyecto convertido; colores hex válidos como los del resto de tableros
+const CONVERSION_COLUMNS = [
+  { name: 'Por Hacer', color: '#f5f5f5', isDone: 0 },
+  { name: 'En Desarrollo', color: '#e6f7ff', isDone: 0 },
+  { name: 'Pruebas / QA', color: '#fff2e6', isDone: 0 },
+  { name: 'Aceptación UAT', color: '#f9f0ff', isDone: 0 },
+  { name: 'Producción / Listo', color: '#f6ffed', isDone: 1 }
+];
+
+const DEFAULT_ASSUMPTIONS =
+  '1. El cliente proporcionará credenciales y ambientes de prueba (QA) con antelación.\n' +
+  '2. Accesos a través de VPN estables y sin autenticación biométrica o token físico no automatizable.\n' +
+  '3. Disponibilidad del responsable del proceso para reuniones de validación y UAT.';
+
+const DEFAULT_EXCLUSIONS =
+  '1. Modificaciones en el código fuente de los sistemas destino o ERP del cliente.\n' +
+  '2. Migraciones mayores de bases de datos o sistemas durante el periodo de construcción.';
+
+/**
+ * Quita de la respuesta los campos de costo interno y margen para cualquier rol distinto de team_lead.
+ * Vale para un registro, su `calculation` anidada o un resultado de /calculate.
+ */
+export function sanitizeScopingForRole<T extends object>(value: T, role: UserRole | undefined): T {
+  if (role === 'team_lead') return value;
+  const copy: Record<string, any> = { ...value };
+  for (const field of INTERNAL_COST_FIELDS) delete copy[field];
+  if (copy.calculation && typeof copy.calculation === 'object') {
+    copy.calculation = { ...copy.calculation };
+    for (const field of INTERNAL_COST_FIELDS) delete copy.calculation[field];
   }
+  return copy as T;
+}
 
+// Solo conserva las claves que traen valor; un objeto sin claves equivale a "sin calibración"
+function normalizeCustomHours(value: CustomHours | null | undefined): CustomHours | null {
+  if (!value) return null;
+  const entries = CUSTOM_HOURS_KEYS.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]);
+  return entries.length > 0 ? (Object.fromEntries(entries) as CustomHours) : null;
+}
+
+function parseCustomHours(raw: string | null | undefined): CustomHours | null {
+  if (!raw) return null;
+  try {
+    return normalizeCustomHours(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+const notFound = (): APIError => new APIError('Levantamiento no encontrado', 404, 'NOT_FOUND_ERROR');
+
+const addDays = (date: Date, days: number): Date => {
+  const copy = new Date(date);
+  copy.setDate(copy.getDate() + days);
+  return copy;
+};
+
+// Fecha local (no UTC): de noche en Chile toISOString() ya marcaría el día siguiente
+const toDateOnly = (date: Date): string =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+export class ScopingService {
   /**
    * Obtiene todos los arquetipos de procesos disponibles
    */
@@ -79,30 +185,25 @@ export class ScopingService {
   /**
    * Ejecuta el cálculo en memoria (simulación / preview en vivo)
    */
-  public calculateDraft(inputs: ScopingInputs): ScopingCalculationResult {
-    return ScopingCalculationEngine.calculate(inputs);
+  public calculateDraft(inputs: ScopingDraftInputs): ScopingCalculationDraft {
+    const customHours = normalizeCustomHours(inputs.custom_hours);
+    const result = ScopingCalculationEngine.calculate({ ...inputs, custom_hours: customHours ?? undefined });
+    return { ...result, custom_hours: customHours };
   }
 
   /**
-   * Genera el siguiente código secuencial COT-YYYY-NNN
+   * Genera el siguiente código COT-YYYY-NNN. El correlativo sale de la secuencia AUTOINCREMENT de la tabla
+   * (nunca retrocede), así que borrar el último levantamiento no libera su código para otra propuesta.
    */
   private async generateNextCode(): Promise<string> {
-    const year = new Date().getFullYear();
-    const prefix = `COT-${year}-`;
-    const row = await this.db.get(
-      `SELECT MAX(code) as max_code FROM scoping_quotations WHERE code LIKE ?`,
-      [`${prefix}%`]
-    ) as { max_code: string | null } | undefined;
+    const prefix = `COT-${new Date().getFullYear()}-`;
+    const sequence = await db.get(`SELECT seq FROM sqlite_sequence WHERE name = 'scoping_quotations'`) as { seq: number } | undefined;
+    const codeFor = (number: number) => `${prefix}${String(number).padStart(3, '0')}`;
 
-    let nextNumber = 1;
-    if (row && row.max_code) {
-      const parts = row.max_code.split('-');
-      if (parts.length === 3) {
-        const parsed = parseInt(parts[2], 10);
-        if (!isNaN(parsed)) nextNumber = parsed + 1;
-      }
-    }
-    return `${prefix}${String(nextNumber).padStart(3, '0')}`;
+    let next = (sequence?.seq ?? 0) + 1;
+    // Códigos asignados con la lógica anterior (MAX(code)+1) pueden ocupar ya ese correlativo
+    while (await db.get('SELECT 1 FROM scoping_quotations WHERE code = ?', [codeFor(next)])) next++;
+    return codeFor(next);
   }
 
   /**
@@ -137,7 +238,7 @@ export class ScopingService {
 
     sql += ` ORDER BY s.created_at DESC`;
 
-    const rows = await this.db.query(sql, params) as any[];
+    const rows = await db.query(sql, params) as any[];
 
     // Calcular KPIs de resumen
     const totalCount = rows.length;
@@ -145,8 +246,13 @@ export class ScopingService {
     const totalProposedPrice = rows.reduce((acc: number, r: any) => acc + (r.proposed_price || 0), 0);
     const viableCount = rows.filter((r: any) => r.viability_status === 'viable').length;
 
+    const items = rows.map(({ custom_hours_json, ...row }) => ({
+      ...row,
+      custom_hours: parseCustomHours(custom_hours_json)
+    }));
+
     return {
-      items: rows,
+      items,
       kpis: {
         total_scopings: totalCount,
         viable_percentage: totalCount > 0 ? Math.round((viableCount / totalCount) * 100) : 0,
@@ -160,7 +266,7 @@ export class ScopingService {
    * Obtiene un levantamiento por ID con detalle completo de cálculo
    */
   public async getById(id: number): Promise<ScopingRecord | null> {
-    const row = await this.db.get(
+    const row = await db.get(
       `SELECT s.*, u.full_name as author_name, p.name as project_name
        FROM scoping_quotations s
        LEFT JOIN users u ON s.created_by = u.id
@@ -171,7 +277,10 @@ export class ScopingService {
 
     if (!row) return null;
 
-    // Reconstruir cálculo reactivo para obtener los desgloses de roles y fases
+    const { custom_hours_json, ...record } = row;
+
+    // Reconstruir cálculo reactivo para obtener los desgloses de roles y fases. Las horas guardadas mandan:
+    // la propuesta muestra lo que se cotizó aunque después cambien los niveles del motor.
     const inputs: ScopingInputs = {
       data_input_type: row.data_input_type,
       rule_based_level: row.rule_based_level,
@@ -180,16 +289,16 @@ export class ScopingService {
       frequency: row.frequency,
       volume_per_frequency: row.volume_per_frequency,
       aht_minutes: row.aht_minutes,
-      current_ftes: row.current_ftes,
-      error_rate_pct: row.error_rate_pct,
-      peak_period: row.peak_period,
+      current_ftes: row.current_ftes ?? undefined,
+      error_rate_pct: row.error_rate_pct ?? undefined,
+      peak_period: row.peak_period ?? undefined,
       process_steps_count: row.process_steps_count,
       decision_complexity: row.decision_complexity,
       applications_count: row.applications_count,
       uses_vdi: Boolean(row.uses_vdi),
       requires_ocr: Boolean(row.requires_ocr),
       structured_data_pct: row.structured_data_pct,
-      exception_rate_pct: row.exception_rate_pct,
+      exception_rate_pct: row.exception_rate_pct ?? undefined,
       currency: row.currency,
       hourly_labor_cost: row.hourly_labor_cost,
       target_hourly_rate: row.target_hourly_rate,
@@ -206,9 +315,10 @@ export class ScopingService {
     const calc = ScopingCalculationEngine.calculate(inputs);
 
     return {
-      ...row,
+      ...record,
       uses_vdi: Boolean(row.uses_vdi),
       requires_ocr: Boolean(row.requires_ocr),
+      custom_hours: parseCustomHours(custom_hours_json),
       calculation: calc
     };
   }
@@ -216,400 +326,371 @@ export class ScopingService {
   /**
    * Crea un nuevo levantamiento / cotización
    */
-  public async create(data: any, userId?: number): Promise<ScopingRecord> {
-    const code = await this.generateNextCode();
-    
-    // Normalizar inputs y calcular
-    const inputs: ScopingInputs = {
-      data_input_type: data.data_input_type || 'digital_structured',
-      rule_based_level: data.rule_based_level || 'rules_mostly',
-      process_stability: data.process_stability || 'no_change',
-      application_stability: data.application_stability || 'no_change',
-      frequency: data.frequency || 'daily',
-      volume_per_frequency: Number(data.volume_per_frequency) || 100,
-      aht_minutes: Number(data.aht_minutes) || 10,
-      current_ftes: data.current_ftes ? Number(data.current_ftes) : 1,
-      error_rate_pct: data.error_rate_pct ? Number(data.error_rate_pct) : 5,
-      peak_period: data.peak_period || 'regular_peak',
-      process_steps_count: data.process_steps_count || '15_25',
-      decision_complexity: data.decision_complexity || 'simple_yes_no',
-      applications_count: data.applications_count || '2_3_apps',
-      uses_vdi: Boolean(data.uses_vdi),
-      requires_ocr: Boolean(data.requires_ocr),
-      structured_data_pct: data.structured_data_pct || 'gte_80',
-      exception_rate_pct: data.exception_rate_pct ? Number(data.exception_rate_pct) : 3,
-      currency: data.currency || 'CLP',
-      hourly_labor_cost: data.hourly_labor_cost ? Number(data.hourly_labor_cost) : undefined,
-      target_hourly_rate: data.target_hourly_rate ? Number(data.target_hourly_rate) : undefined,
-      internal_cost_rate: data.internal_cost_rate ? Number(data.internal_cost_rate) : undefined,
-      custom_hours: data.custom_hours
+  public async create(data: Record<string, any>, actor: ScopingActor): Promise<ScopingRecord> {
+    const resolved = this.resolveFields(data);
+    this.assertStatusAssignable(resolved.details.status);
+
+    const calc = ScopingCalculationEngine.calculate(resolved.inputs);
+    const columns = {
+      code: await this.generateNextCode(),
+      created_by: actor.id,
+      ...this.buildColumns(resolved, calc)
     };
+    const names = Object.keys(columns);
 
-    const calc = ScopingCalculationEngine.calculate(inputs);
-
-    const assumptionsDefault = data.assumptions || 
-      '1. El cliente proporcionará credenciales y ambientes de prueba (QA) con antelación.\n' +
-      '2. Accesos a través de VPN estables y sin autenticación biométrica o token físico no automatizable.\n' +
-      '3. Disponibilidad del responsable del proceso para reuniones de validación y UAT.';
-
-    const exclusionsDefault = data.exclusions ||
-      '1. Modificaciones en el código fuente de los sistemas destino o ERP del cliente.\n' +
-      '2. Migraciones mayores de bases de datos o sistemas durante el periodo de construcción.';
-
-    const insertSql = `
-      INSERT INTO scoping_quotations (
-        code, client_name, client_contact, client_email,
-        process_name, business_unit, process_archetype, created_by,
-        data_input_type, rule_based_level, process_stability, application_stability,
-        frequency, volume_per_frequency, aht_minutes, current_ftes, error_rate_pct, peak_period,
-        process_steps_count, decision_complexity, applications_count, applications_detail,
-        uses_vdi, requires_ocr, structured_data_pct, exception_rate_pct,
-        viability_status, viability_score, complexity_score, difficulty_score,
-        effort_level, benefit_level, annual_manual_hours, hours_saved_annual, ftes_released,
-        error_reduction_pct, aht_reduction_pct,
-        estimated_weeks, hours_pm, hours_consultant, hours_developer, hours_advisor, total_hours,
-        currency, hourly_labor_cost, target_hourly_rate, internal_cost_rate,
-        project_internal_cost, proposed_price, projected_margin_pct,
-        client_annual_manual_cost, client_annual_savings, payback_months, roi_first_year_pct,
-        assumptions, exclusions, notes, status
-      ) VALUES (
-        ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?,
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?
-      )
-    `;
-
-    const params = [
-      code,
-      data.client_name || 'Cliente sin nombre',
-      data.client_contact || null,
-      data.client_email || null,
-      data.process_name || 'Proceso sin nombre',
-      data.business_unit || null,
-      data.process_archetype || 'custom',
-      userId || null,
-
-      inputs.data_input_type,
-      inputs.rule_based_level,
-      inputs.process_stability,
-      inputs.application_stability,
-      inputs.frequency,
-      inputs.volume_per_frequency,
-      inputs.aht_minutes,
-      inputs.current_ftes,
-      inputs.error_rate_pct,
-      inputs.peak_period,
-      inputs.process_steps_count,
-      inputs.decision_complexity,
-      inputs.applications_count,
-      data.applications_detail || null,
-      inputs.uses_vdi ? 1 : 0,
-      inputs.requires_ocr ? 1 : 0,
-      inputs.structured_data_pct,
-      inputs.exception_rate_pct,
-
-      calc.viability_status,
-      calc.viability_score,
-      calc.complexity_score,
-      calc.difficulty_score,
-      calc.effort_level,
-      calc.benefit_level,
-      calc.annual_manual_hours,
-      calc.hours_saved_annual,
-      calc.ftes_released,
-      calc.error_reduction_pct,
-      calc.aht_reduction_pct,
-
-      calc.estimated_weeks,
-      calc.hours_pm,
-      calc.hours_consultant,
-      calc.hours_developer,
-      calc.hours_advisor,
-      calc.total_hours,
-
-      calc.currency,
-      inputs.hourly_labor_cost ?? 14000,
-      calc.target_hourly_rate,
-      inputs.internal_cost_rate ?? 18000,
-      calc.project_internal_cost,
-      calc.proposed_price,
-      calc.projected_margin_pct,
-      calc.client_annual_manual_cost,
-      calc.client_annual_savings,
-      calc.payback_months,
-      calc.roi_first_year_pct,
-
-      assumptionsDefault,
-      exclusionsDefault,
-      data.notes || null,
-      data.status || 'draft'
-    ];
-
-    const result = await this.db.run(insertSql, params);
+    const result = await db.run(
+      `INSERT INTO scoping_quotations (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`,
+      Object.values(columns)
+    );
     const newId = result.id!;
-    logger.info(`Levantamiento/Cotización creada exitosamente con ID ${newId} y código ${code}`);
+    logger.info(`Levantamiento/Cotización creada exitosamente con ID ${newId} y código ${columns.code}`);
 
-    const created = await this.getById(newId);
-    return created!;
+    return (await this.getById(newId))!;
   }
 
   /**
-   * Actualiza un levantamiento existente
+   * Actualiza un levantamiento existente. El cuerpo es parcial: lo que no llega se conserva del registro
+   * guardado (incluida la calibración manual de horas) y el resultado se recalcula con las entradas fusionadas.
    */
-  public async update(id: number, data: any, userId?: number): Promise<ScopingRecord> {
-    const existing = await this.getById(id);
-    if (!existing) {
-      throw new Error(`Levantamiento con ID ${id} no encontrado.`);
+  public async update(id: number, data: Record<string, any>, actor: ScopingActor): Promise<ScopingRecord> {
+    const existing = await this.requireModifiable(id, actor);
+    if (existing.status === 'converted_to_project') {
+      throw new ConflictError('No se puede modificar un levantamiento que ya fue convertido a proyecto');
     }
 
-    const inputs: ScopingInputs = {
-      data_input_type: data.data_input_type ?? existing.data_input_type,
-      rule_based_level: data.rule_based_level ?? existing.rule_based_level,
-      process_stability: data.process_stability ?? existing.process_stability,
-      application_stability: data.application_stability ?? existing.application_stability,
-      frequency: data.frequency ?? existing.frequency,
-      volume_per_frequency: data.volume_per_frequency !== undefined ? Number(data.volume_per_frequency) : existing.volume_per_frequency,
-      aht_minutes: data.aht_minutes !== undefined ? Number(data.aht_minutes) : existing.aht_minutes,
-      current_ftes: data.current_ftes !== undefined ? Number(data.current_ftes) : existing.current_ftes,
-      error_rate_pct: data.error_rate_pct !== undefined ? Number(data.error_rate_pct) : existing.error_rate_pct,
-      peak_period: data.peak_period ?? existing.peak_period,
-      process_steps_count: data.process_steps_count ?? existing.process_steps_count,
-      decision_complexity: data.decision_complexity ?? existing.decision_complexity,
-      applications_count: data.applications_count ?? existing.applications_count,
-      uses_vdi: data.uses_vdi !== undefined ? Boolean(data.uses_vdi) : existing.uses_vdi,
-      requires_ocr: data.requires_ocr !== undefined ? Boolean(data.requires_ocr) : existing.requires_ocr,
-      structured_data_pct: data.structured_data_pct ?? existing.structured_data_pct,
-      exception_rate_pct: data.exception_rate_pct !== undefined ? Number(data.exception_rate_pct) : existing.exception_rate_pct,
-      currency: data.currency ?? existing.currency,
-      hourly_labor_cost: data.hourly_labor_cost !== undefined ? Number(data.hourly_labor_cost) : existing.hourly_labor_cost,
-      target_hourly_rate: data.target_hourly_rate !== undefined ? Number(data.target_hourly_rate) : existing.target_hourly_rate,
-      internal_cost_rate: data.internal_cost_rate !== undefined ? Number(data.internal_cost_rate) : existing.internal_cost_rate,
-      custom_hours: data.custom_hours
-    };
+    const resolved = this.resolveFields(data, existing);
+    this.assertStatusAssignable(resolved.details.status, existing.status);
 
-    const calc = ScopingCalculationEngine.calculate(inputs);
+    const calc = ScopingCalculationEngine.calculate(resolved.inputs);
+    const columns = this.buildColumns(resolved, calc);
 
-    const updateSql = `
-      UPDATE scoping_quotations SET
-        client_name = ?, client_contact = ?, client_email = ?,
-        process_name = ?, business_unit = ?, process_archetype = ?,
-        data_input_type = ?, rule_based_level = ?, process_stability = ?, application_stability = ?,
-        frequency = ?, volume_per_frequency = ?, aht_minutes = ?, current_ftes = ?, error_rate_pct = ?, peak_period = ?,
-        process_steps_count = ?, decision_complexity = ?, applications_count = ?, applications_detail = ?,
-        uses_vdi = ?, requires_ocr = ?, structured_data_pct = ?, exception_rate_pct = ?,
-        viability_status = ?, viability_score = ?, complexity_score = ?, difficulty_score = ?,
-        effort_level = ?, benefit_level = ?, annual_manual_hours = ?, hours_saved_annual = ?, ftes_released = ?,
-        error_reduction_pct = ?, aht_reduction_pct = ?,
-        estimated_weeks = ?, hours_pm = ?, hours_consultant = ?, hours_developer = ?, hours_advisor = ?, total_hours = ?,
-        currency = ?, hourly_labor_cost = ?, target_hourly_rate = ?, internal_cost_rate = ?,
-        project_internal_cost = ?, proposed_price = ?, projected_margin_pct = ?,
-        client_annual_manual_cost = ?, client_annual_savings = ?, payback_months = ?, roi_first_year_pct = ?,
-        assumptions = ?, exclusions = ?, notes = ?, status = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `;
-
-    const params = [
-      data.client_name ?? existing.client_name,
-      data.client_contact ?? existing.client_contact,
-      data.client_email ?? existing.client_email,
-      data.process_name ?? existing.process_name,
-      data.business_unit ?? existing.business_unit,
-      data.process_archetype ?? existing.process_archetype,
-
-      inputs.data_input_type,
-      inputs.rule_based_level,
-      inputs.process_stability,
-      inputs.application_stability,
-      inputs.frequency,
-      inputs.volume_per_frequency,
-      inputs.aht_minutes,
-      inputs.current_ftes,
-      inputs.error_rate_pct,
-      inputs.peak_period,
-      inputs.process_steps_count,
-      inputs.decision_complexity,
-      inputs.applications_count,
-      data.applications_detail ?? existing.applications_detail,
-      inputs.uses_vdi ? 1 : 0,
-      inputs.requires_ocr ? 1 : 0,
-      inputs.structured_data_pct,
-      inputs.exception_rate_pct,
-
-      calc.viability_status,
-      calc.viability_score,
-      calc.complexity_score,
-      calc.difficulty_score,
-      calc.effort_level,
-      calc.benefit_level,
-      calc.annual_manual_hours,
-      calc.hours_saved_annual,
-      calc.ftes_released,
-      calc.error_reduction_pct,
-      calc.aht_reduction_pct,
-
-      calc.estimated_weeks,
-      calc.hours_pm,
-      calc.hours_consultant,
-      calc.hours_developer,
-      calc.hours_advisor,
-      calc.total_hours,
-
-      calc.currency,
-      inputs.hourly_labor_cost ?? 14000,
-      calc.target_hourly_rate,
-      inputs.internal_cost_rate ?? 18000,
-      calc.project_internal_cost,
-      calc.proposed_price,
-      calc.projected_margin_pct,
-      calc.client_annual_manual_cost,
-      calc.client_annual_savings,
-      calc.payback_months,
-      calc.roi_first_year_pct,
-
-      data.assumptions ?? existing.assumptions,
-      data.exclusions ?? existing.exclusions,
-      data.notes ?? existing.notes,
-      data.status ?? existing.status,
-      id
-    ];
-
-    await this.db.run(updateSql, params);
+    await db.run(
+      `UPDATE scoping_quotations SET ${Object.keys(columns).map((name) => `${name} = ?`).join(', ')},
+        updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [...Object.values(columns), id]
+    );
     logger.info(`Levantamiento ID ${id} actualizado correctamente.`);
 
-    const updated = await this.getById(id);
-    return updated!;
+    return (await this.getById(id))!;
   }
 
   /**
-   * Elimina un levantamiento (solo permitido en borradores o rechazados)
+   * Elimina un levantamiento (solo borradores; solo su autor o team_lead)
    */
-  public async delete(id: number): Promise<boolean> {
-    const existing = await this.getById(id);
-    if (!existing) {
-      throw new Error(`Levantamiento con ID ${id} no encontrado.`);
+  public async delete(id: number, actor: ScopingActor): Promise<void> {
+    const existing = await this.requireModifiable(id, actor);
+    if (existing.status !== 'draft') {
+      throw new ConflictError('Solo se pueden eliminar levantamientos en estado borrador');
     }
 
-    if (existing.status === 'converted_to_project') {
-      throw new Error('No se puede eliminar un levantamiento que ya fue convertido a proyecto.');
-    }
-
-    await this.db.run(`DELETE FROM scoping_quotations WHERE id = ?`, [id]);
+    await db.run(`DELETE FROM scoping_quotations WHERE id = ?`, [id]);
     logger.info(`Levantamiento ID ${id} eliminado.`);
-    return true;
   }
 
   /**
-   * Convierte una cotización aprobada en un Proyecto formal con tareas y fases automáticas
+   * Convierte un levantamiento viable en un Proyecto con tablero Kanban, tareas y fases del cálculo.
+   * Todo ocurre en una transacción: si algo falla no queda proyecto, tablero ni columnas a medias.
    */
-  public async convertToProject(id: number, userId: number): Promise<{ project_id: number; message: string }> {
+  public async convertToProject(id: number, actor: ScopingActor): Promise<{ project_id: number; message: string }> {
     const scoping = await this.getById(id);
-    if (!scoping) {
-      throw new Error(`Levantamiento con ID ${id} no encontrado.`);
+    if (!scoping) throw notFound();
+
+    if (scoping.status === 'converted_to_project' || scoping.converted_project_id) {
+      throw new ConflictError(
+        scoping.converted_project_id
+          ? `Este levantamiento ya fue convertido al proyecto ID ${scoping.converted_project_id}`
+          : 'Este levantamiento ya fue convertido a proyecto'
+      );
     }
 
-    if (scoping.converted_project_id) {
-      throw new Error(`Este levantamiento ya fue convertido al proyecto ID ${scoping.converted_project_id}`);
+    const calc = scoping.calculation!;
+    if (scoping.viability_status !== 'viable') {
+      throw new ConflictError(`No se puede convertir a proyecto un levantamiento no viable (${calc.viability_label})`);
     }
 
-    // 1. Crear el proyecto en la tabla projects
+    const phases = calc.phases_breakdown;
+    const client = await db.get(
+      `SELECT id FROM clients WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND is_active = 1 ORDER BY id LIMIT 1`,
+      [scoping.client_name]
+    ) as { id: number } | undefined;
+    const templates = await db.query(
+      `SELECT id, name FROM project_phase_templates WHERE name IN (${PHASE_TEMPLATE_NAMES.map(() => '?').join(', ')})`,
+      PHASE_TEMPLATE_NAMES
+    ) as Array<{ id: number; name: string }>;
+
     const startDate = new Date();
-    const endDate = new Date();
-    endDate.setDate(startDate.getDate() + (scoping.estimated_weeks * 7));
-
-    const projectInsertSql = `
-      INSERT INTO projects (
-        name, description, start_date, end_date, status, budget, created_by
-      ) VALUES (?, ?, ?, ?, 'active', ?, ?)
-    `;
-
-    const projectDesc = `Proyecto RPA generado a partir del levantamiento ${scoping.code}.\n` +
+    const endDate = addDays(startDate, scoping.estimated_weeks * 7 - 1);
+    const projectDescription = `Proyecto RPA generado a partir del levantamiento ${scoping.code}.\n` +
       `Cliente: ${scoping.client_name}\n` +
       `Proceso: ${scoping.process_name}\n` +
-      `Esfuerzo estimado: ${scoping.effort_level.toUpperCase()} (${scoping.total_hours} HH en ${scoping.estimated_weeks} semanas)\n` +
-      `Precio Propuesto: ${scoping.currency} ${scoping.proposed_price.toLocaleString()}`;
+      `Esfuerzo estimado: ${calc.effort_label} (${scoping.total_hours} HH en ${scoping.estimated_weeks} semanas)\n` +
+      `Precio propuesto: ${scoping.currency} ${scoping.proposed_price.toLocaleString('es-CL')}`;
 
-    const projectResult = await this.db.run(projectInsertSql, [
-      `RPA - ${scoping.process_name} (${scoping.client_name})`,
-      projectDesc,
-      startDate.toISOString().slice(0, 10),
-      endDate.toISOString().slice(0, 10),
-      scoping.proposed_price,
-      userId
-    ]);
-
-    const projectId = projectResult.id!;
-
-    // 2. Crear el tablero Kanban predeterminado
-    const boardResult = await this.db.run(
-      `INSERT INTO task_boards (project_id, name, description, is_default)
-       VALUES (?, 'Tablero Principal RPA', 'Flujo de construcción y despliegue del robot', 1)`,
-      [projectId]
-    );
-    const boardId = boardResult.id!;
-
-    // Columnas estándar
-    const columns = [
-      { name: 'Por Hacer', pos: 0, color: '#gray' },
-      { name: 'En Desarrollo', pos: 1, color: '#blue' },
-      { name: 'Pruebas / QA', pos: 2, color: '#orange' },
-      { name: 'Aceptación UAT', pos: 3, color: '#purple' },
-      { name: 'Producción / Listo', pos: 4, color: '#green', is_done: 1 }
-    ];
-
-    let firstColId = 0;
-    for (const col of columns) {
-      const colRes = await this.db.run(
-        `INSERT INTO task_columns (board_id, name, position, color, is_done_column)
-         VALUES (?, ?, ?, ?, ?)`,
-        [boardId, col.name, col.pos, col.color, col.is_done ? 1 : 0]
+    await db.beginTransaction('IMMEDIATE');
+    let projectId: number;
+    let phasesCreated = 0;
+    try {
+      // Mismos campos que un proyecto comercial nuevo: queda en cotización hasta que el cliente apruebe
+      const project = await db.run(
+        `INSERT INTO projects (
+          name, description, status, priority, budget, start_date, end_date, created_by,
+          client_id, project_type, currency, commercial_stage
+        ) VALUES (?, ?, 'on_hold', 'medium', ?, ?, ?, ?, ?, 'commercial', ?, 'quoting')`,
+        [
+          `RPA - ${scoping.process_name} (${scoping.client_name})`,
+          projectDescription,
+          scoping.project_internal_cost,
+          toDateOnly(startDate),
+          toDateOnly(endDate),
+          actor.id,
+          client?.id ?? null,
+          scoping.currency
+        ]
       );
-      if (col.pos === 0) firstColId = colRes.id!;
-    }
+      projectId = project.id!;
 
-    // 3. Crear las tareas basadas en las 5 fases estándar de RPA
-    if (scoping.calculation && scoping.calculation.phases_breakdown) {
-      for (const phase of scoping.calculation.phases_breakdown) {
-        await this.db.run(
+      await db.run(
+        `INSERT INTO project_financials (
+          project_id, budgeted_cost, budgeted_cost_currency, sale_price, sale_price_currency, budgeted_hours
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+        [projectId, scoping.project_internal_cost, scoping.currency, scoping.proposed_price, scoping.currency, scoping.total_hours]
+      );
+
+      const board = await db.run(
+        `INSERT INTO task_boards (project_id, name, description, board_type, is_default)
+         VALUES (?, 'Tablero Principal RPA', 'Flujo de construcción y despliegue del robot', 'kanban', 1)`,
+        [projectId]
+      );
+      const boardId = board.id!;
+
+      let firstColumnId = 0;
+      for (const [index, column] of CONVERSION_COLUMNS.entries()) {
+        const created = await db.run(
+          `INSERT INTO task_columns (board_id, name, position, color, is_done_column)
+           VALUES (?, ?, ?, ?, ?)`,
+          [boardId, column.name, index + 1, column.color, column.isDone]
+        );
+        if (index === 0) firstColumnId = created.id!;
+      }
+
+      for (const [index, phase] of phases.entries()) {
+        const plannedStart = toDateOnly(addDays(startDate, (phase.start_week - 1) * 7));
+        const plannedEnd = toDateOnly(addDays(startDate, phase.end_week * 7 - 1));
+
+        await db.run(
           `INSERT INTO tasks (
-            board_id, column_id, title, description, priority, estimated_hours, created_by
-          ) VALUES (?, ?, ?, ?, 'medium', ?, ?)`,
+            board_id, column_id, title, description, status, priority, position,
+            estimated_hours, start_date, due_date, reporter_id
+          ) VALUES (?, ?, ?, ?, 'todo', 'medium', ?, ?, ?, ?, ?)`,
           [
             boardId,
-            firstColId,
+            firstColumnId,
             `Fase ${phase.phase_number}: ${phase.name}`,
             `${phase.description} (Semana ${phase.start_week} a ${phase.end_week})`,
+            index,
             phase.hours,
-            userId
+            plannedStart,
+            plannedEnd,
+            actor.id
           ]
         );
+
+        const template = templates.find((t) => t.name === PHASE_TEMPLATE_NAMES[index]);
+        if (template) {
+          await db.run(
+            `INSERT INTO project_phases (
+              project_id, template_id, name, description, phase_order,
+              planned_start_date, planned_end_date, estimated_hours, is_billable, responsibility
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'internal')`,
+            [projectId, template.id, phase.name, phase.description, phase.phase_number, plannedStart, plannedEnd, phase.hours]
+          );
+          phasesCreated++;
+        } else {
+          logger.warn(`Plantilla de ciclo de vida "${PHASE_TEMPLATE_NAMES[index]}" no encontrada: la fase ${phase.phase_number} se crea solo como tarea`);
+        }
       }
+
+      // La condición evita que dos conversiones simultáneas dejen dos proyectos para el mismo levantamiento
+      const marked = await db.run(
+        `UPDATE scoping_quotations
+         SET status = 'converted_to_project', converted_project_id = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND converted_project_id IS NULL AND status <> 'converted_to_project'`,
+        [projectId, id]
+      );
+      if (!marked.changes) {
+        throw new ConflictError('Este levantamiento ya fue convertido a proyecto');
+      }
+
+      await db.commit();
+    } catch (error) {
+      try {
+        await db.rollback();
+      } catch (rollbackError) {
+        logger.error('No se pudo revertir la conversión del levantamiento:', rollbackError);
+      }
+      throw error;
     }
 
-    // 4. Actualizar el scoping_quotations con status y converted_project_id
-    await this.db.run(
-      `UPDATE scoping_quotations 
-       SET status = 'converted_to_project', converted_project_id = ?, updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [projectId, id]
-    );
-
-    logger.info(`Cotización ${scoping.code} convertida con éxito a proyecto ID ${projectId}`);
+    await activityLogService.logActivity(actor.id, 'project', projectId, 'created_from_scoping', null, {
+      scoping_id: id,
+      scoping_code: scoping.code,
+      tasks_count: phases.length,
+      phases_count: phasesCreated
+    });
+    logger.info(`Levantamiento ${scoping.code} convertido con éxito a proyecto ID ${projectId}`);
 
     return {
       project_id: projectId,
-      message: `Proyecto creado exitosamente con ${scoping.calculation?.phases_breakdown.length || 5} tareas y fases asignadas.`
+      message: `Proyecto creado exitosamente con ${phases.length} tareas y ${phasesCreated} fases asignadas.`
+    };
+  }
+
+  // Carga el levantamiento y exige que quien lo modifica sea su autor o team_lead
+  private async requireModifiable(id: number, actor: ScopingActor): Promise<ScopingRecord> {
+    const existing = await this.getById(id);
+    if (!existing) throw notFound();
+
+    if (actor.role !== 'team_lead' && existing.created_by !== actor.id) {
+      throw new AuthorizationError('Solo el autor del levantamiento o la jefatura pueden modificarlo');
+    }
+    return existing;
+  }
+
+  // "Convertida a proyecto" solo se asigna convirtiendo: un PUT o POST no puede dejar ese estado sin proyecto
+  private assertStatusAssignable(next: ScopingStatus, current?: ScopingStatus): void {
+    if (next === 'converted_to_project' && current !== 'converted_to_project') {
+      throw new ConflictError('El estado "convertida a proyecto" solo se asigna al convertir el levantamiento en proyecto');
+    }
+  }
+
+  /**
+   * Une el cuerpo recibido con el registro guardado (si existe): lo ausente se conserva, null limpia
+   * campos opcionales. Al cambiar de moneda sin enviar tarifas, se usan las tarifas por defecto de la nueva moneda.
+   */
+  private resolveFields(data: Record<string, any>, existing?: ScopingRecord): ResolvedScoping {
+    const current = existing as Record<string, any> | undefined;
+    const pick = (key: string, fallback?: any) => (data[key] !== undefined ? data[key] : current ? current[key] : fallback);
+    const optional = (key: string, fallback?: any) => pick(key, fallback) ?? undefined;
+    const text = (key: string) => pick(key, null) ?? null;
+
+    const currency = pick('currency', 'CLP');
+    const currencyChanged = current !== undefined && currency !== current.currency;
+    const rate = (key: string) => (data[key] !== undefined ? data[key] : current && !currencyChanged ? current[key] ?? undefined : undefined);
+    const customHours = data.custom_hours !== undefined ? normalizeCustomHours(data.custom_hours) : (existing?.custom_hours ?? null);
+
+    const inputs: ScopingInputs = {
+      data_input_type: pick('data_input_type'),
+      rule_based_level: pick('rule_based_level'),
+      process_stability: pick('process_stability'),
+      application_stability: pick('application_stability'),
+      frequency: pick('frequency'),
+      volume_per_frequency: pick('volume_per_frequency'),
+      aht_minutes: pick('aht_minutes'),
+      current_ftes: optional('current_ftes', 1),
+      error_rate_pct: optional('error_rate_pct', 5),
+      peak_period: optional('peak_period', 'regular_peak'),
+      process_steps_count: pick('process_steps_count'),
+      decision_complexity: pick('decision_complexity'),
+      applications_count: pick('applications_count'),
+      uses_vdi: pick('uses_vdi'),
+      requires_ocr: pick('requires_ocr'),
+      structured_data_pct: pick('structured_data_pct'),
+      exception_rate_pct: optional('exception_rate_pct', 3),
+      currency,
+      hourly_labor_cost: rate('hourly_labor_cost'),
+      target_hourly_rate: rate('target_hourly_rate'),
+      internal_cost_rate: rate('internal_cost_rate'),
+      custom_hours: customHours ?? undefined
+    };
+
+    const details = {
+      client_name: pick('client_name', 'Cliente sin nombre') as string,
+      client_contact: text('client_contact') as string | null,
+      client_email: text('client_email') as string | null,
+      process_name: pick('process_name', 'Proceso sin nombre') as string,
+      business_unit: text('business_unit') as string | null,
+      process_archetype: (pick('process_archetype', 'custom') || 'custom') as string,
+      applications_detail: text('applications_detail') as string | null,
+      assumptions: (current ? text('assumptions') : data.assumptions || DEFAULT_ASSUMPTIONS) as string | null,
+      exclusions: (current ? text('exclusions') : data.exclusions || DEFAULT_EXCLUSIONS) as string | null,
+      notes: text('notes') as string | null,
+      status: pick('status', 'draft') as ScopingStatus
+    };
+
+    return { details, inputs, customHours };
+  }
+
+  // Columnas editables del levantamiento: las comparten INSERT y UPDATE para que nunca se desalineen
+  private buildColumns(
+    { details, inputs, customHours }: ResolvedScoping,
+    calc: ScopingCalculationResult
+  ): Record<string, ColumnValue> {
+    // Las tarifas se guardan en la moneda elegida: las explícitas del cliente o, si no hay, las de esa moneda
+    const defaultRates = ScopingCalculationEngine.getDefaultRates(calc.currency);
+
+    return {
+      client_name: details.client_name,
+      client_contact: details.client_contact,
+      client_email: details.client_email,
+      process_name: details.process_name,
+      business_unit: details.business_unit,
+      process_archetype: details.process_archetype,
+
+      data_input_type: inputs.data_input_type,
+      rule_based_level: inputs.rule_based_level,
+      process_stability: inputs.process_stability,
+      application_stability: inputs.application_stability,
+      frequency: inputs.frequency,
+      volume_per_frequency: inputs.volume_per_frequency,
+      aht_minutes: inputs.aht_minutes,
+      current_ftes: inputs.current_ftes ?? null,
+      error_rate_pct: inputs.error_rate_pct ?? null,
+      peak_period: inputs.peak_period ?? null,
+      process_steps_count: inputs.process_steps_count,
+      decision_complexity: inputs.decision_complexity,
+      applications_count: inputs.applications_count,
+      applications_detail: details.applications_detail,
+      uses_vdi: inputs.uses_vdi ? 1 : 0,
+      requires_ocr: inputs.requires_ocr ? 1 : 0,
+      structured_data_pct: inputs.structured_data_pct,
+      exception_rate_pct: inputs.exception_rate_pct ?? null,
+
+      viability_status: calc.viability_status,
+      viability_score: calc.viability_score,
+      complexity_score: calc.complexity_score,
+      difficulty_score: calc.difficulty_score,
+      effort_level: calc.effort_level,
+      benefit_level: calc.benefit_level,
+      annual_manual_hours: calc.annual_manual_hours,
+      hours_saved_annual: calc.hours_saved_annual,
+      ftes_released: calc.ftes_released,
+      error_reduction_pct: calc.error_reduction_pct,
+      aht_reduction_pct: calc.aht_reduction_pct,
+
+      estimated_weeks: calc.estimated_weeks,
+      hours_pm: calc.hours_pm,
+      hours_consultant: calc.hours_consultant,
+      hours_developer: calc.hours_developer,
+      hours_advisor: calc.hours_advisor,
+      total_hours: calc.total_hours,
+
+      currency: calc.currency,
+      hourly_labor_cost: inputs.hourly_labor_cost ?? defaultRates.labor,
+      target_hourly_rate: calc.target_hourly_rate,
+      internal_cost_rate: inputs.internal_cost_rate ?? defaultRates.internal,
+      project_internal_cost: calc.project_internal_cost,
+      proposed_price: calc.proposed_price,
+      projected_margin_pct: calc.projected_margin_pct,
+      client_annual_manual_cost: calc.client_annual_manual_cost,
+      client_annual_savings: calc.client_annual_savings,
+      payback_months: calc.payback_months,
+      roi_first_year_pct: calc.roi_first_year_pct,
+
+      assumptions: details.assumptions,
+      exclusions: details.exclusions,
+      notes: details.notes,
+      status: details.status,
+      custom_hours_json: customHours ? JSON.stringify(customHours) : null
     };
   }
 }

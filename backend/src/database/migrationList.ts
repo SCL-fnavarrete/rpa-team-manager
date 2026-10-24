@@ -2208,6 +2208,13 @@ export const migrations: Migration[] = [
       `CREATE INDEX IF NOT EXISTS idx_scoping_archetype ON scoping_quotations(process_archetype)`,
       `CREATE INDEX IF NOT EXISTS idx_scoping_created ON scoping_quotations(created_at DESC)`
     ]
+  },
+  {
+    version: 48,
+    description: 'Cotizador de RPA: persistir la calibración manual de horas (custom_hours_json; NULL = sin calibración)',
+    up: [
+      `ALTER TABLE scoping_quotations ADD COLUMN custom_hours_json TEXT`
+    ]
   }
 ];
 

@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth';
-import { ScopingService } from '../services/scopingService';
+import { ScopingActor, ScopingService, sanitizeScopingForRole } from '../services/scopingService';
+import { APIError } from '../utils/errors';
 import { logger } from '../utils/logger';
 
 export class ScopingController {
@@ -8,6 +9,30 @@ export class ScopingController {
 
   constructor() {
     this.scopingService = new ScopingService();
+  }
+
+  // Los errores esperados (APIError) salen con su código y su mensaje en español; cualquier otro se
+  // registra y nunca expone texto interno (por ejemplo, errores SQL) al usuario.
+  private fail(res: Response, error: unknown, context: string, fallback: string): void {
+    if (error instanceof APIError && error.isOperational) {
+      res.status(error.statusCode).json({ success: false, error: error.message });
+      return;
+    }
+    logger.error(`${context}:`, error);
+    res.status(500).json({ success: false, error: fallback });
+  }
+
+  private parseId(raw: string): number | null {
+    const id = Number(raw);
+    return Number.isInteger(id) && id > 0 ? id : null;
+  }
+
+  private actorOf(req: AuthenticatedRequest, res: Response): ScopingActor | null {
+    if (!req.user) {
+      res.status(401).json({ success: false, error: 'Autenticación requerida' });
+      return null;
+    }
+    return { id: req.user.id, role: req.user.role };
   }
 
   /**
@@ -21,11 +46,7 @@ export class ScopingController {
         data: archetypes
       });
     } catch (error) {
-      logger.error('Error fetching RPA archetypes:', error);
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Error al obtener arquetipos de procesos'
-      });
+      this.fail(res, error, 'Error fetching RPA archetypes', 'Error al obtener arquetipos de procesos');
     }
   };
 
@@ -38,14 +59,10 @@ export class ScopingController {
       const result = this.scopingService.calculateDraft(req.body);
       res.json({
         success: true,
-        data: result
+        data: sanitizeScopingForRole(result, req.user?.role)
       });
     } catch (error) {
-      logger.error('Error calculating scoping draft:', error);
-      res.status(400).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Error al calcular cotización'
-      });
+      this.fail(res, error, 'Error calculating scoping draft', 'Error al calcular la cotización');
     }
   };
 
@@ -64,15 +81,11 @@ export class ScopingController {
 
       res.json({
         success: true,
-        data: result.items,
+        data: result.items.map((item) => sanitizeScopingForRole(item, req.user?.role)),
         kpis: result.kpis
       });
     } catch (error) {
-      logger.error('Error fetching scopings:', error);
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Error al listar levantamientos'
-      });
+      this.fail(res, error, 'Error fetching scopings', 'Error al listar levantamientos');
     }
   };
 
@@ -81,8 +94,8 @@ export class ScopingController {
    */
   public getById = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const id = parseInt(req.params.id, 10);
-      if (isNaN(id)) {
+      const id = this.parseId(req.params.id);
+      if (id === null) {
         res.status(400).json({ success: false, error: 'ID inválido' });
         return;
       }
@@ -95,14 +108,10 @@ export class ScopingController {
 
       res.json({
         success: true,
-        data: scoping
+        data: sanitizeScopingForRole(scoping, req.user?.role)
       });
     } catch (error) {
-      logger.error('Error fetching scoping by id:', error);
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Error al obtener levantamiento'
-      });
+      this.fail(res, error, 'Error fetching scoping by id', 'Error al obtener el levantamiento');
     }
   };
 
@@ -111,46 +120,42 @@ export class ScopingController {
    */
   public create = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const userId = req.user?.id;
-      const created = await this.scopingService.create(req.body, userId);
+      const actor = this.actorOf(req, res);
+      if (!actor) return;
+
+      const created = await this.scopingService.create(req.body, actor);
       res.status(201).json({
         success: true,
         message: 'Levantamiento guardado exitosamente',
-        data: created
+        data: sanitizeScopingForRole(created, actor.role)
       });
     } catch (error) {
-      logger.error('Error creating scoping:', error);
-      res.status(400).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Error al crear levantamiento'
-      });
+      this.fail(res, error, 'Error creating scoping', 'No se pudo guardar el levantamiento. Intenta nuevamente.');
     }
   };
 
   /**
    * PUT /api/scopings/:id
+   * Cuerpo parcial: lo que no llega se conserva del registro guardado
    */
   public update = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const id = parseInt(req.params.id, 10);
-      if (isNaN(id)) {
+      const id = this.parseId(req.params.id);
+      if (id === null) {
         res.status(400).json({ success: false, error: 'ID inválido' });
         return;
       }
+      const actor = this.actorOf(req, res);
+      if (!actor) return;
 
-      const userId = req.user?.id;
-      const updated = await this.scopingService.update(id, req.body, userId);
+      const updated = await this.scopingService.update(id, req.body, actor);
       res.json({
         success: true,
         message: 'Levantamiento actualizado exitosamente',
-        data: updated
+        data: sanitizeScopingForRole(updated, actor.role)
       });
     } catch (error) {
-      logger.error('Error updating scoping:', error);
-      res.status(400).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Error al actualizar levantamiento'
-      });
+      this.fail(res, error, 'Error updating scoping', 'No se pudo actualizar el levantamiento. Intenta nuevamente.');
     }
   };
 
@@ -159,52 +164,54 @@ export class ScopingController {
    */
   public delete = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const id = parseInt(req.params.id, 10);
-      if (isNaN(id)) {
+      const id = this.parseId(req.params.id);
+      if (id === null) {
         res.status(400).json({ success: false, error: 'ID inválido' });
         return;
       }
+      const actor = this.actorOf(req, res);
+      if (!actor) return;
 
-      await this.scopingService.delete(id);
+      await this.scopingService.delete(id, actor);
       res.json({
         success: true,
         message: 'Levantamiento eliminado exitosamente'
       });
     } catch (error) {
-      logger.error('Error deleting scoping:', error);
-      res.status(400).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Error al eliminar levantamiento'
-      });
+      this.fail(res, error, 'Error deleting scoping', 'No se pudo eliminar el levantamiento. Intenta nuevamente.');
     }
   };
 
   /**
    * POST /api/scopings/:id/convert-to-project
+   * El acceso (team_lead / rpa_operations) lo restringe la ruta.
    */
   public convertToProject = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const id = parseInt(req.params.id, 10);
-      if (isNaN(id)) {
+      const id = this.parseId(req.params.id);
+      if (id === null) {
         res.status(400).json({ success: false, error: 'ID inválido' });
         return;
       }
+      const actor = this.actorOf(req, res);
+      if (!actor) return;
 
-      const userId = req.user?.id || 1;
-      const result = await this.scopingService.convertToProject(id, userId);
+      const result = await this.scopingService.convertToProject(id, actor);
       res.json({
         success: true,
         message: result.message,
         data: {
-          project_id: result.project_id
+          project_id: result.project_id,
+          message: result.message
         }
       });
     } catch (error) {
-      logger.error('Error converting scoping to project:', error);
-      res.status(400).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Error al convertir cotización a proyecto'
-      });
+      this.fail(
+        res,
+        error,
+        'Error converting scoping to project',
+        'No se pudo convertir el levantamiento en proyecto. No se creó ningún dato; intenta nuevamente.'
+      );
     }
   };
 }

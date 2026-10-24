@@ -10,8 +10,14 @@ export interface ValidationTarget {
     query?: z.ZodSchema;
 }
 
+export interface ValidationOptions {
+    // Responde 400 { success: false, error } con el primer mensaje del esquema, en vez de delegar en el
+    // manejador global (que solo informa "Validation failed"). Para rutas cuyos mensajes ya van en español.
+    inlineErrors?: boolean;
+}
+
 // Generic validation middleware factory
-export const validate = (schemas: ValidationTarget) => {
+export const validate = (schemas: ValidationTarget, options: ValidationOptions = {}) => {
     return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
         try {
             // Validate request body
@@ -46,6 +52,11 @@ export const validate = (schemas: ValidationTarget) => {
                     errors: validationErrors,
                     ip: req.ip
                 });
+
+                if (options.inlineErrors) {
+                    res.status(400).json({ success: false, error: validationErrors[0]?.message ?? 'Datos inválidos' });
+                    return;
+                }
 
                 const validationError = new ValidationError('Validation failed');
                 return next(validationError);

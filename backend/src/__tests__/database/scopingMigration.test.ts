@@ -160,3 +160,76 @@ describe('Migración 47 - Cotizador RPA (scoping_quotations)', () => {
         expect(row.created_by).toBeNull();
     });
 });
+
+describe('Migración 48 - calibración manual persistida (custom_hours_json)', () => {
+    let dbPath: string;
+
+    const open = (): Promise<sqlite3.Database> =>
+        new Promise((resolve, reject) => {
+            const conn = new sqlite3.Database(dbPath, (err) => (err ? reject(err) : resolve(conn)));
+        });
+
+    const all = (conn: sqlite3.Database, sql: string, params: any[] = []): Promise<any[]> =>
+        new Promise((resolve, reject) => conn.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
+
+    const run = (conn: sqlite3.Database, sql: string, params: any[] = []): Promise<void> =>
+        new Promise((resolve, reject) => conn.run(sql, params, (err) => (err ? reject(err) : resolve())));
+
+    const migrate = async (upTo?: number) => {
+        const manager = new MigrationManager();
+        await manager.init(dbPath);
+        await manager.runMigrations(upTo ? migrations.filter((m) => m.version <= upTo) : migrations);
+        await manager.close();
+    };
+
+    beforeAll(() => {
+        dbPath = path.join(os.tmpdir(), `migration48-scoping-test-${Date.now()}.sqlite`);
+    });
+
+    afterAll(() => {
+        if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    });
+
+    it('agrega custom_hours_json nullable y conserva filas existentes con NULL', async () => {
+        await migrate(47);
+
+        const before = await open();
+        await run(
+            before,
+            `INSERT INTO scoping_quotations (
+                code, client_name, process_name, data_input_type, rule_based_level, process_stability,
+                application_stability, frequency, process_steps_count, decision_complexity, applications_count,
+                structured_data_pct, viability_status, viability_score, complexity_score, difficulty_score,
+                effort_level, benefit_level, annual_manual_hours, hours_saved_annual, ftes_released,
+                error_reduction_pct, aht_reduction_pct, project_internal_cost, proposed_price, projected_margin_pct,
+                client_annual_manual_cost, client_annual_savings, payback_months, roi_first_year_pct
+            ) VALUES (
+                'COT-LEGACY', 'Cliente previo', 'Proceso previo', 'digital_structured', 'rules_mostly', 'no_change',
+                'no_change', 'daily', '15_25', 'simple_yes_no', '2_3_apps',
+                'gte_80', 'viable', 0.8, 0.3, 0.3,
+                'low', 'high', 1000, 800, 0.4,
+                90, 60, 4248000, 8496000, 50,
+                14000000, 11000000, 9.2, 30
+            )`
+        );
+        const columnsBefore = (await all(before, 'PRAGMA table_info(scoping_quotations)')).map((c) => c.name);
+        await new Promise<void>((resolve) => before.close(() => resolve()));
+        expect(columnsBefore).not.toContain('custom_hours_json');
+
+        await migrate();
+
+        const after = await open();
+        try {
+            const column = (await all(after, 'PRAGMA table_info(scoping_quotations)')).find((c) => c.name === 'custom_hours_json');
+            const applied = (await all(after, 'SELECT version FROM schema_migrations')).map((r) => r.version);
+
+            expect(applied).toContain(48);
+            expect(column).toMatchObject({ type: 'TEXT', notnull: 0 });
+
+            const [legacy] = await all(after, `SELECT code, custom_hours_json FROM scoping_quotations WHERE code = 'COT-LEGACY'`);
+            expect(legacy).toEqual({ code: 'COT-LEGACY', custom_hours_json: null });
+        } finally {
+            await new Promise<void>((resolve) => after.close(() => resolve()));
+        }
+    });
+});
