@@ -44,18 +44,25 @@ import {
 const { Text, Title } = Typography;
 const { TextArea } = Input;
 
+// Campos que se guardan y se muestran en la propuesta pero que el motor no usa en ningún número
+const REFERENCE_ONLY_HINT = 'Solo referencia, no afecta el cálculo';
+
 interface DiscoveryWizardProps {
   form: any;
   inputs: ScopingInputs;
   onValuesChange: (changedValues: any, allValues: any) => void;
   selectedArchetype?: RPAArchetype;
+  customHoursEnabled: boolean;
+  onCustomHoursToggle: (enabled: boolean) => void;
 }
 
 export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
   form,
   inputs,
   onValuesChange,
-  selectedArchetype
+  selectedArchetype,
+  customHoursEnabled,
+  onCustomHoursToggle
 }) => {
   const { token } = theme.useToken();
   const isDark = typeof document !== 'undefined' && (
@@ -66,7 +73,10 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
   );
 
   const [activeTab, setActiveTab] = useState<string>('gate0');
-  const [customHoursEnabled, setCustomHoursEnabled] = useState<boolean>(false);
+
+  // Las tarifas se rotulan con la moneda elegida; las UF llevan decimales
+  const currency = inputs.currency ?? 'CLP';
+  const rateStep = currency === 'UF' ? 0.01 : 1;
 
   // Atajos rápidos de aplicaciones comunes
   const commonApps = ['SAP S/4HANA', 'SAP GUI', 'Microsoft Dynamics 365', 'Softland', 'Defontana', 'Portal SII', 'Excel', 'Outlook', 'Chrome / Web B2B'];
@@ -95,6 +105,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
         items={[
           {
             key: 'gate0',
+            forceRender: true,
             label: (
               <span>
                 <SafetyCertificateOutlined />
@@ -263,6 +274,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
           },
           {
             key: 'systems',
+            forceRender: true,
             label: (
               <span>
                 <DesktopOutlined />
@@ -392,7 +404,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                           </div>
                         </div>
                         <Form.Item name="uses_vdi" valuePropName="checked" noStyle>
-                          <Switch />
+                          <Switch aria-label="Acceso por VDI / Citrix / RDP" />
                         </Form.Item>
                       </div>
                     </div>
@@ -420,7 +432,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                           </div>
                         </div>
                         <Form.Item name="requires_ocr" valuePropName="checked" noStyle>
-                          <Switch />
+                          <Switch aria-label="Requiere OCR / documentos escaneados" />
                         </Form.Item>
                       </div>
                     </div>
@@ -431,6 +443,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
           },
           {
             key: 'volume',
+            forceRender: true,
             label: (
               <span>
                 <RiseOutlined />
@@ -484,7 +497,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                         </Space>
                       }
                       name="aht_minutes"
-                      rules={[{ required: true }]}
+                      rules={[{ required: true, message: 'Ingresa el tiempo manual (AHT)' }]}
                     >
                       <InputNumber 
                         min={0.1} 
@@ -499,6 +512,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                     <Form.Item 
                       label={<Text strong>Colaboradores Actuales (FTEs)</Text>}
                       name="current_ftes"
+                      extra={REFERENCE_ONLY_HINT}
                     >
                       <InputNumber min={0.5} step={0.5} style={{ width: '100%' }} />
                     </Form.Item>
@@ -508,6 +522,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                     <Form.Item 
                       label={<Text strong>Tasa de Error Humano (%)</Text>}
                       name="error_rate_pct"
+                      extra={REFERENCE_ONLY_HINT}
                     >
                       <InputNumber min={0} max={100} style={{ width: '100%' }} addonAfter="%" />
                     </Form.Item>
@@ -526,6 +541,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                     <Form.Item 
                       label={<Text strong>Periodos Punta o Peak del Proceso</Text>}
                       name="peak_period"
+                      extra={REFERENCE_ONLY_HINT}
                     >
                       <Select
                         options={[
@@ -543,6 +559,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
           },
           {
             key: 'proposal',
+            forceRender: true,
             label: (
               <span>
                 <DollarOutlined />
@@ -567,7 +584,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                       label={<Text strong>Tarifa Venta por Hora (Equipo RPA)</Text>}
                       name="target_hourly_rate"
                     >
-                      <InputNumber min={1} style={{ width: '100%' }} />
+                      <InputNumber min={0} step={rateStep} addonAfter={currency} style={{ width: '100%' }} />
                     </Form.Item>
                   </Col>
 
@@ -583,7 +600,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                       }
                       name="hourly_labor_cost"
                     >
-                      <InputNumber min={1} style={{ width: '100%' }} />
+                      <InputNumber min={0} step={rateStep} addonAfter={currency} style={{ width: '100%' }} />
                     </Form.Item>
                   </Col>
                 </Row>
@@ -596,11 +613,11 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                     <Text strong>Calibración Manual de Horas (Opcional)</Text>
                     <div style={{ fontSize: 12 }}>
                       <Text type="secondary">
-                        Por defecto, el motor cubica automáticamente según la matriz del caso real (Facturas / Scoring). Activa esto si deseas ajustar horas específicas por rol.
+                        Por defecto, el motor cubica automáticamente según la matriz del caso real (Facturas / Scoring). Activa esto si deseas ajustar horas específicas por rol; los campos que dejes vacíos usan el valor calculado.
                       </Text>
                     </div>
                   </div>
-                  <Switch checked={customHoursEnabled} onChange={setCustomHoursEnabled} />
+                  <Switch aria-label="Calibración manual de horas" checked={customHoursEnabled} onChange={onCustomHoursToggle} />
                 </div>
 
                 {customHoursEnabled && (
@@ -614,7 +631,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                     <Row gutter={[12, 12]}>
                       <Col xs={12} sm={8} md={4}>
                         <Form.Item label="Semanas" name={['custom_hours', 'weeks']}>
-                          <InputNumber min={1} max={30} style={{ width: '100%' }} />
+                          <InputNumber min={1} max={520} precision={0} style={{ width: '100%' }} />
                         </Form.Item>
                       </Col>
                       <Col xs={12} sm={8} md={5}>

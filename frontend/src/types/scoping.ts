@@ -70,6 +70,18 @@ export type ViabilityStatus =
 export type EffortLevel = 'low' | 'medium' | 'high';
 export type BenefitLevel = 'low' | 'medium' | 'medium_high' | 'high';
 
+/**
+ * Calibración manual de horas. Solo trae las claves calibradas: lo que falta usa el valor
+ * calculado por el motor. Nunca lleva `null` dentro (la API responde 400): se omite la clave.
+ */
+export interface CustomHours {
+  lp?: number;
+  crpa?: number;
+  ar?: number;
+  adv?: number;
+  weeks?: number;
+}
+
 export interface ScopingInputs {
   client_name?: string;
   client_contact?: string;
@@ -109,13 +121,8 @@ export interface ScopingInputs {
   notes?: string;
   status?: 'draft' | 'sent_to_client' | 'approved' | 'rejected' | 'converted_to_project';
 
-  custom_hours?: {
-    lp?: number;
-    crpa?: number;
-    ar?: number;
-    adv?: number;
-    weeks?: number;
-  };
+  // null = sin calibración manual (se usan los niveles del motor)
+  custom_hours?: CustomHours | null;
 }
 
 export interface ProjectPhaseEstimate {
@@ -173,13 +180,17 @@ export interface ScopingCalculationResult {
   
   currency: 'CLP' | 'USD' | 'UF';
   target_hourly_rate: number;
-  project_internal_cost: number;
+  // Costo interno y margen: la API los omite para todo rol distinto de team_lead
+  project_internal_cost?: number;
   proposed_price: number;
-  projected_margin_pct: number;
+  projected_margin_pct?: number;
   client_annual_manual_cost: number;
   client_annual_savings: number;
   payback_months: number;
   roi_first_year_pct: number;
+
+  // Eco de la calibración aplicada (solo en la respuesta de /calculate)
+  custom_hours?: CustomHours | null;
 }
 
 export interface RPAArchetype {
@@ -229,10 +240,11 @@ export interface ScopingQuotationRecord extends ScopingInputs {
   currency: 'CLP' | 'USD' | 'UF';
   hourly_labor_cost: number;
   target_hourly_rate: number;
-  internal_cost_rate: number;
-  project_internal_cost: number;
+  // La API omite los tres campos de costo interno para todo rol distinto de team_lead
+  internal_cost_rate?: number;
+  project_internal_cost?: number;
   proposed_price: number;
-  projected_margin_pct: number;
+  projected_margin_pct?: number;
   client_annual_manual_cost: number;
   client_annual_savings: number;
   payback_months: number;
@@ -241,6 +253,7 @@ export interface ScopingQuotationRecord extends ScopingInputs {
   status: 'draft' | 'sent_to_client' | 'approved' | 'rejected' | 'converted_to_project';
   converted_project_id?: number | null;
 
+  // Ausente cuando los datos guardados no permiten reconstruir el cálculo (fila dañada)
   calculation?: ScopingCalculationResult;
 }
 

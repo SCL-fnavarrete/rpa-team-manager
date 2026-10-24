@@ -38,7 +38,8 @@ export const scopingService = {
   },
 
   /**
-   * Ejecuta el cálculo reactivo en memoria para preview durante la reunión
+   * Ejecuta el cálculo reactivo en memoria para preview durante la reunión.
+   * La API exige el conjunto completo de entradas (ver buildScopingInputs).
    */
   async calculate(inputs: ScopingInputs): Promise<ScopingCalculationResult> {
     const res = await apiService.post<CalculateResponse>('/scopings/calculate', inputs);
@@ -68,15 +69,16 @@ export const scopingService = {
   },
 
   /**
-   * Guarda un nuevo levantamiento
+   * Guarda un nuevo levantamiento (conjunto completo de entradas, igual que /calculate)
    */
-  async create(data: Partial<ScopingInputs>): Promise<ScopingQuotationRecord> {
+  async create(data: ScopingInputs): Promise<ScopingQuotationRecord> {
     const res = await apiService.post<{ success: boolean; data: ScopingQuotationRecord }>('/scopings', data);
     return res.data;
   },
 
   /**
-   * Actualiza un levantamiento existente
+   * Actualiza un levantamiento existente. El cuerpo es parcial: lo que no se envía se conserva,
+   * salvo `custom_hours: null`, que limpia la calibración manual.
    */
   async update(id: number, data: Partial<ScopingInputs>): Promise<ScopingQuotationRecord> {
     const res = await apiService.put<{ success: boolean; data: ScopingQuotationRecord }>(`/scopings/${id}`, data);

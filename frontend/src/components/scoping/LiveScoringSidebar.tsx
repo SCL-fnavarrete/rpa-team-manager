@@ -1,5 +1,5 @@
 import React from 'react';
-import { Card, Typography, Tag, Space, Divider, Alert, Button, theme } from 'antd';
+import { Card, Typography, Tag, Space, Divider, Alert, Button, Spin, theme } from 'antd';
 import { 
   CheckCircleOutlined, 
   WarningOutlined, 
@@ -18,6 +18,8 @@ const { Text, Title } = Typography;
 interface LiveScoringSidebarProps {
   calculation: ScopingCalculationResult | null;
   loading?: boolean;
+  // Mensaje del servidor cuando el cálculo falló; el panel no muestra números en ese caso
+  error?: string | null;
   onOpenProposal: () => void;
   onSaveQuote: () => void;
   isSaving?: boolean;
@@ -25,7 +27,8 @@ interface LiveScoringSidebarProps {
 
 export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
   calculation,
-  loading: _loading = false,
+  loading = false,
+  error = null,
   onOpenProposal,
   onSaveQuote,
   isSaving = false
@@ -38,16 +41,31 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
     token.colorBgElevated === '#262626'
   );
 
-  if (!calculation) {
+  if (error || !calculation) {
     return (
       <Card 
         styles={{ body: { padding: 20 } }}
+        aria-busy={loading}
         style={{
           border: `1px solid ${token.colorBorderSecondary}`,
           backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : token.colorBgContainer
         }}
       >
-        <Text type="secondary">Completa las variables del levantamiento para visualizar la estimación en tiempo real.</Text>
+        {error ? (
+          <Alert
+            type="error"
+            showIcon
+            message="No se pudo calcular la estimación"
+            description={error}
+          />
+        ) : loading ? (
+          <Space size={8}>
+            <Spin size="small" />
+            <Text type="secondary">Calculando…</Text>
+          </Space>
+        ) : (
+          <Text type="secondary">Completa las variables del levantamiento para visualizar la estimación en tiempo real.</Text>
+        )}
       </Card>
     );
   }
@@ -78,6 +96,7 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
   return (
     <Card 
       styles={{ body: { padding: '18px 20px' } }}
+      aria-busy={loading}
       style={{
         border: `1px solid ${token.colorBorderSecondary}`,
         backgroundColor: isDark ? 'rgba(255, 255, 255, 0.03)' : token.colorBgContainer,
@@ -87,9 +106,17 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
     >
       {/* 1. Header con Badge de Viabilidad */}
       <div style={{ marginBottom: 14 }}>
-        <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-          Diagnóstico de Factibilidad RPA
-        </Text>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+          <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            Diagnóstico de Factibilidad RPA
+          </Text>
+          {loading && (
+            <Space size={6}>
+              <Spin size="small" />
+              <Text type="secondary" style={{ fontSize: 12 }}>Calculando…</Text>
+            </Space>
+          )}
+        </div>
         <div style={{ marginTop: 4 }}>
           <Alert 
             type={currentViability.type}
@@ -203,10 +230,12 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
           <Text type="secondary">Tarifa venta aplicada:</Text>
           <Text>{formatCurrency(calculation.target_hourly_rate, calculation.currency)}/h</Text>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 2 }}>
-          <Text type="secondary">Margen estimado:</Text>
-          <Text strong style={{ color: token.colorSuccess }}>{calculation.projected_margin_pct}%</Text>
-        </div>
+        {calculation.projected_margin_pct !== undefined && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 2 }}>
+            <Text type="secondary">Margen estimado:</Text>
+            <Text strong style={{ color: token.colorSuccess }}>{calculation.projected_margin_pct}%</Text>
+          </div>
+        )}
 
         <Divider style={{ margin: '10px 0' }} />
 

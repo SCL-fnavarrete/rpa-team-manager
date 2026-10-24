@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Card, Space, Typography, Button, Tag, Select, Tooltip, Progress, theme } from 'antd';
 import { 
   PlayCircleOutlined, 
@@ -36,17 +36,42 @@ export const MeetingTimerHeader: React.FC<MeetingTimerHeaderProps> = ({
   const [seconds, setSeconds] = useState<number>(0);
   const [isRunning, setIsRunning] = useState<boolean>(false);
 
+  // El tiempo se mide con el reloj y no contando ticks: el navegador atrasa los intervalos
+  // de una pestaña en segundo plano y el cronómetro quedaría corto.
+  const accumulatedMsRef = useRef<number>(0); // tramos ya cerrados (pausas)
+  const startedAtRef = useRef<number | null>(null); // inicio del tramo en curso
+
+  const getElapsedSeconds = useCallback((): number => {
+    const running = startedAtRef.current === null ? 0 : Date.now() - startedAtRef.current;
+    return Math.floor((accumulatedMsRef.current + running) / 1000);
+  }, []);
+
   useEffect(() => {
-    let interval: any = null;
-    if (isRunning) {
-      interval = setInterval(() => {
-        setSeconds((prev) => prev + 1);
-      }, 1000);
-    } else {
-      clearInterval(interval);
-    }
+    if (!isRunning) return undefined;
+    const interval = setInterval(() => setSeconds(getElapsedSeconds()), 1000);
     return () => clearInterval(interval);
-  }, [isRunning]);
+  }, [isRunning, getElapsedSeconds]);
+
+  const handleStart = () => {
+    startedAtRef.current = Date.now();
+    setIsRunning(true);
+  };
+
+  const handlePause = () => {
+    if (startedAtRef.current !== null) {
+      accumulatedMsRef.current += Date.now() - startedAtRef.current;
+      startedAtRef.current = null;
+    }
+    setIsRunning(false);
+    setSeconds(getElapsedSeconds());
+  };
+
+  const handleReset = () => {
+    accumulatedMsRef.current = 0;
+    startedAtRef.current = null;
+    setIsRunning(false);
+    setSeconds(0);
+  };
 
   const formatTime = (totalSeconds: number) => {
     const mins = Math.floor(totalSeconds / 60);
@@ -109,6 +134,7 @@ export const MeetingTimerHeader: React.FC<MeetingTimerHeaderProps> = ({
           </Space>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Select
+              aria-label="Plantilla rápida de proceso"
               style={{ minWidth: 280, flex: 1 }}
               placeholder="Seleccionar plantilla..."
               value={selectedArchetypeId || undefined}
@@ -169,7 +195,7 @@ export const MeetingTimerHeader: React.FC<MeetingTimerHeaderProps> = ({
                   type="primary" 
                   shape="circle" 
                   icon={<PlayCircleOutlined />} 
-                  onClick={() => setIsRunning(true)} 
+                  onClick={handleStart} 
                 />
               </Tooltip>
             ) : (
@@ -177,7 +203,7 @@ export const MeetingTimerHeader: React.FC<MeetingTimerHeaderProps> = ({
                 <Button 
                   shape="circle" 
                   icon={<PauseCircleOutlined />} 
-                  onClick={() => setIsRunning(false)} 
+                  onClick={handlePause} 
                 />
               </Tooltip>
             )}
@@ -185,10 +211,7 @@ export const MeetingTimerHeader: React.FC<MeetingTimerHeaderProps> = ({
               <Button 
                 shape="circle" 
                 icon={<ReloadOutlined />} 
-                onClick={() => {
-                  setIsRunning(false);
-                  setSeconds(0);
-                }} 
+                onClick={handleReset} 
               />
             </Tooltip>
           </Space>

@@ -1,29 +1,38 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { 
-  Form, 
-  Row, 
-  Col, 
-  Tabs, 
-  Typography, 
-  message, 
-  Modal, 
-  theme 
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import {
+  Form,
+  Row,
+  Col,
+  Tabs,
+  Typography,
+  message,
+  Modal,
+  theme
 } from 'antd';
-import { 
-  CalculatorOutlined, 
-  HistoryOutlined, 
+import {
+  CalculatorOutlined,
+  HistoryOutlined,
   CheckCircleOutlined,
   ThunderboltOutlined
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { 
-  ScopingInputs, 
-  ScopingCalculationResult, 
-  ScopingQuotationRecord, 
-  RPAArchetype, 
-  ScopingKpis 
+import {
+  ScopingInputs,
+  ScopingCalculationResult,
+  ScopingQuotationRecord,
+  RPAArchetype,
+  ScopingKpis
 } from '../../types/scoping';
 import { scopingService } from '../../services/scopingService';
+import {
+  DEFAULT_INPUTS,
+  ScopingCurrency,
+  affectsCalculation,
+  buildScopingInputs,
+  normalizeCustomHours,
+  ratesForCurrency,
+  recordToFormValues
+} from '../../utils/scopingInputs';
 import { MeetingTimerHeader } from '../../components/scoping/MeetingTimerHeader';
 import { DiscoveryWizard } from '../../components/scoping/DiscoveryWizard';
 import { LiveScoringSidebar } from '../../components/scoping/LiveScoringSidebar';
@@ -33,40 +42,8 @@ import { ScopingArchetypeQuestionsModal } from '../../components/scoping/Scoping
 
 const { Title, Paragraph } = Typography;
 
-const DEFAULT_INPUTS: ScopingInputs = {
-  client_name: '',
-  process_name: '',
-  business_unit: '',
-  client_contact: '',
-  process_archetype: 'custom',
-
-  data_input_type: 'digital_structured',
-  rule_based_level: 'rules_mostly',
-  process_stability: 'no_change',
-  application_stability: 'no_change',
-
-  frequency: 'daily',
-  volume_per_frequency: 100,
-  aht_minutes: 10,
-  current_ftes: 1,
-  error_rate_pct: 5,
-  peak_period: 'regular_peak',
-
-  process_steps_count: '15_25',
-  decision_complexity: 'simple_yes_no',
-  applications_count: '2_3_apps',
-  applications_detail: 'SAP, Excel, Portales Web',
-  uses_vdi: false,
-  requires_ocr: false,
-  structured_data_pct: 'gte_80',
-  exception_rate_pct: 3,
-
-  currency: 'CLP',
-  hourly_labor_cost: 14000,
-  target_hourly_rate: 36000,
-  internal_cost_rate: 18000,
-  status: 'draft'
-};
+// Espera tras la última tecla antes de consultar el historial
+const SEARCH_DEBOUNCE_MS = 400;
 
 export const ScopingPage: React.FC = () => {
   const { token } = theme.useToken();
@@ -75,19 +52,31 @@ export const ScopingPage: React.FC = () => {
 
   const [activeMainTab, setActiveMainTab] = useState<string>('wizard');
   const [archetypes, setArchetypes] = useState<RPAArchetype[]>([]);
-  const [selectedArchetype, setSelectedArchetype] = useState<RPAArchetype | undefined>();
+  const [archetypeId, setArchetypeId] = useState<string | undefined>();
+  const selectedArchetype = useMemo(
+    () => archetypes.find((a) => a.id === archetypeId),
+    [archetypes, archetypeId]
+  );
   const [archetypeModalVisible, setArchetypeModalVisible] = useState<boolean>(false);
+  const [customHoursEnabled, setCustomHoursEnabled] = useState<boolean>(false);
+  // Cambia al iniciar o cargar un levantamiento: remonta cronómetro y asistente (cronómetro en 0 y Paso 1)
+  const [wizardSession, setWizardSession] = useState<number>(0);
 
   // Estado del cálculo en vivo
   const [currentInputs, setCurrentInputs] = useState<ScopingInputs>(DEFAULT_INPUTS);
   const [calculation, setCalculation] = useState<ScopingCalculationResult | null>(null);
+  const [calculationError, setCalculationError] = useState<string | null>(null);
   const [isCalculating, setIsCalculating] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  // Numera los cálculos para descartar respuestas que llegan fuera de orden
+  const calculationSeq = useRef<number>(0);
 
   // Modal de propuesta formal
   const [proposalModalVisible, setProposalModalVisible] = useState<boolean>(false);
-  const [savedQuoteCode, setSavedQuoteCode] = useState<string>('COT-2026-NUEVA');
+  const [savedQuoteCode, setSavedQuoteCode] = useState<string | undefined>();
   const [lastSavedId, setLastSavedId] = useState<number | null>(null);
+  // Registro del historial que muestra la propuesta; null = la propuesta es la del asistente en curso
+  const [historyProposal, setHistoryProposal] = useState<ScopingQuotationRecord | null>(null);
   const [isConverting, setIsConverting] = useState<boolean>(false);
 
   // Historial de cotizaciones
@@ -99,40 +88,72 @@ export const ScopingPage: React.FC = () => {
     total_proposed_amount: 0
   });
   const [historyLoading, setHistoryLoading] = useState<boolean>(false);
+  // El campo de búsqueda responde al instante; la consulta usa `appliedSearch`, que llega con retraso
   const [searchFilter, setSearchFilter] = useState<string>('');
+  const [appliedSearch, setAppliedSearch] = useState<string>('');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [statusFilter, setStatusFilter] = useState<string | undefined>();
 
-  // 1. Cargar arquetipos y calcular inicial
+  // Cálculo reactivo: un resultado vigente, o el error del servidor mostrado en el panel
+  const triggerCalculate = useCallback(async (inputs: ScopingInputs) => {
+    const seq = ++calculationSeq.current;
+    setIsCalculating(true);
+    try {
+      const result = await scopingService.calculate(inputs);
+      if (seq !== calculationSeq.current) return;
+      setCalculation(result);
+      setCalculationError(null);
+    } catch (err: any) {
+      if (seq !== calculationSeq.current) return;
+      // Sin cálculo vigente no se muestran los números anteriores como si siguieran valiendo
+      setCalculation(null);
+      setCalculationError(err?.message || 'No se pudo calcular la estimación. Revisa los datos e intenta nuevamente.');
+    } finally {
+      if (seq === calculationSeq.current) setIsCalculating(false);
+    }
+  }, []);
+
+  // Todas las entradas del formulario, incluidas las de pasos que aún no se visitaron
+  const collectInputs = useCallback(
+    (): ScopingInputs => buildScopingInputs(form.getFieldsValue(true)),
+    [form]
+  );
+
+  const refreshPreview = useCallback((recalculate: boolean = true) => {
+    const inputs = collectInputs();
+    setCurrentInputs(inputs);
+    if (recalculate) void triggerCalculate(inputs);
+  }, [collectInputs, triggerCalculate]);
+
+  // 1. Calcular el estado inicial y cargar arquetipos
   useEffect(() => {
-    const loadInitialData = async () => {
+    refreshPreview();
+    const loadArchetypes = async () => {
       try {
-        const archList = await scopingService.getArchetypes();
-        setArchetypes(archList);
-        form.setFieldsValue(DEFAULT_INPUTS);
-        triggerCalculate(DEFAULT_INPUTS);
-      } catch (err) {
-        console.error('Error cargando arquetipos:', err);
+        setArchetypes(await scopingService.getArchetypes());
+      } catch (err: any) {
+        message.error(err?.message || 'No se pudieron cargar las plantillas de proceso.');
       }
     };
-    void loadInitialData();
-  }, [form]);
+    void loadArchetypes();
+  }, [refreshPreview]);
 
   // 2. Cargar historial
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
     try {
       const res = await scopingService.getAll({
-        search: searchFilter || undefined,
+        search: appliedSearch || undefined,
         status: statusFilter || undefined
       });
       setHistoryItems(res.data || []);
       if (res.kpis) setKpis(res.kpis);
-    } catch (err) {
-      console.error('Error cargando historial:', err);
+    } catch (err: any) {
+      message.error(err?.message || 'No se pudo cargar el historial de levantamientos.');
     } finally {
       setHistoryLoading(false);
     }
-  }, [searchFilter, statusFilter]);
+  }, [appliedSearch, statusFilter]);
 
   useEffect(() => {
     if (activeMainTab === 'history') {
@@ -140,43 +161,44 @@ export const ScopingPage: React.FC = () => {
     }
   }, [activeMainTab, loadHistory]);
 
-  // 3. Cálculo reactivo (debounced)
-  const triggerCalculate = async (values: ScopingInputs) => {
-    setIsCalculating(true);
-    try {
-      const result = await scopingService.calculate(values);
-      setCalculation(result);
-    } catch (err) {
-      console.error('Error calculando cotización:', err);
-    } finally {
-      setIsCalculating(false);
-    }
+  const handleSearchChange = (value: string) => {
+    setSearchFilter(value);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => setAppliedSearch(value), SEARCH_DEBOUNCE_MS);
   };
 
-  const handleFormValuesChange = (_changedValues: any, allValues: any) => {
-    const merged: ScopingInputs = {
-      ...currentInputs,
-      ...allValues,
-      uses_vdi: Boolean(allValues.uses_vdi),
-      requires_ocr: Boolean(allValues.requires_ocr)
-    };
-    setCurrentInputs(merged);
-    void triggerCalculate(merged);
+  useEffect(() => () => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+  }, []);
+
+  const handleFormValuesChange = (changedValues: Record<string, unknown>) => {
+    // Cambiar la moneda reemplaza las tarifas por las de esa moneda (no quedan tarifas en CLP rotuladas como USD)
+    if (changedValues.currency) {
+      form.setFieldsValue(ratesForCurrency(changedValues.currency as ScopingCurrency));
+    }
+    // Escribir cliente, notas, etc. actualiza la propuesta pero no recalcula
+    refreshPreview(affectsCalculation(changedValues));
+  };
+
+  const handleCustomHoursToggle = (enabled: boolean) => {
+    setCustomHoursEnabled(enabled);
+    if (!enabled) {
+      // Los campos se ocultan pero seguirían en el formulario: sin limpiarlos se calcularía y guardaría con ellos
+      form.setFieldValue('custom_hours', undefined);
+      refreshPreview();
+    }
   };
 
   // 4. Seleccionar un arquetipo
   const handleSelectArchetype = (archetype: RPAArchetype) => {
-    setSelectedArchetype(archetype);
-    const updated = {
-      ...form.getFieldsValue(),
+    setArchetypeId(archetype.id);
+    form.setFieldsValue({
       process_archetype: archetype.id,
       process_name: archetype.name,
       applications_detail: archetype.typical_systems,
       ...archetype.default_inputs
-    };
-    form.setFieldsValue(updated);
-    setCurrentInputs(updated);
-    void triggerCalculate(updated);
+    });
+    refreshPreview();
     message.success(`Plantilla cargada: ${archetype.name}`);
   };
 
@@ -184,20 +206,21 @@ export const ScopingPage: React.FC = () => {
   const handleSaveQuote = async () => {
     try {
       await form.validateFields();
-    } catch {
-      message.error('Por favor completa los campos requeridos antes de guardar.');
+    } catch (err: any) {
+      // Los campos de pasos ocultos también se validan: se dice cuál falta
+      const firstError = err?.errorFields?.[0]?.errors?.[0];
+      message.error(
+        firstError
+          ? `Por favor completa los campos requeridos antes de guardar: ${firstError}`
+          : 'Por favor completa los campos requeridos antes de guardar.'
+      );
       return;
     }
 
     setIsSaving(true);
     try {
-      const values = form.getFieldsValue();
-      const payload: Partial<ScopingInputs> = {
-        ...values,
-        uses_vdi: Boolean(values.uses_vdi),
-        requires_ocr: Boolean(values.requires_ocr),
-        process_archetype: selectedArchetype?.id || values.process_archetype || 'custom'
-      };
+      // Mismas entradas que vio el panel: el conjunto completo, nunca solo lo que se montó
+      const payload = collectInputs();
 
       let savedRecord: ScopingQuotationRecord;
       if (lastSavedId) {
@@ -206,11 +229,11 @@ export const ScopingPage: React.FC = () => {
       } else {
         savedRecord = await scopingService.create(payload);
         setLastSavedId(savedRecord.id);
-        setSavedQuoteCode(savedRecord.code);
         message.success(`Cotización ${savedRecord.code} guardada exitosamente.`);
       }
 
       setSavedQuoteCode(savedRecord.code);
+      setHistoryProposal(null);
       setProposalModalVisible(true);
     } catch (err: any) {
       message.error(err.message || 'Error al guardar la cotización.');
@@ -253,15 +276,38 @@ export const ScopingPage: React.FC = () => {
   const handleViewProposalFromHistory = async (record: ScopingQuotationRecord) => {
     try {
       const full = await scopingService.getById(record.id);
-      setCurrentInputs(full);
-      form.setFieldsValue(full);
-      setCalculation(full.calculation || null);
-      setLastSavedId(full.id);
-      setSavedQuoteCode(full.code);
+      if (!full.calculation) {
+        message.warning('Los datos guardados de este levantamiento no permiten calcular su propuesta. Edítalo para corregirlos.');
+        return;
+      }
+      // Solo se muestra: el formulario del asistente en curso no se toca
+      setHistoryProposal(full);
       setProposalModalVisible(true);
-    } catch (err) {
-      console.error(err);
-      message.error('Error al cargar la propuesta seleccionada.');
+    } catch (err: any) {
+      message.error(err?.message || 'Error al cargar la propuesta seleccionada.');
+    }
+  };
+
+  // Carga el registro completo en el asistente: arquetipo, interruptores y calibración manual incluidos
+  const loadRecordIntoWizard = (record: ScopingQuotationRecord) => {
+    form.resetFields();
+    form.setFieldsValue(recordToFormValues(record));
+    setCustomHoursEnabled(normalizeCustomHours(record.custom_hours) !== null);
+    setArchetypeId(record.process_archetype);
+    setLastSavedId(record.id);
+    setSavedQuoteCode(record.code);
+    setHistoryProposal(null);
+    setWizardSession((n) => n + 1);
+    refreshPreview();
+  };
+
+  const handleEditFromHistory = async (record: ScopingQuotationRecord) => {
+    try {
+      const full = await scopingService.getById(record.id);
+      loadRecordIntoWizard(full);
+      setActiveMainTab('wizard');
+    } catch (err: any) {
+      message.error(err?.message || 'Error al cargar el levantamiento seleccionado.');
     }
   };
 
@@ -274,6 +320,30 @@ export const ScopingPage: React.FC = () => {
       message.error(err.message || 'Error al eliminar.');
     }
   };
+
+  const handleNewScoping = () => {
+    form.resetFields();
+    setLastSavedId(null);
+    setSavedQuoteCode(undefined);
+    setHistoryProposal(null);
+    setArchetypeId(undefined);
+    setCustomHoursEnabled(false);
+    setWizardSession((n) => n + 1);
+    refreshPreview();
+    setActiveMainTab('wizard');
+  };
+
+  const handleOpenWizardProposal = () => {
+    setHistoryProposal(null);
+    setProposalModalVisible(true);
+  };
+
+  // Lo que muestra la propuesta: el registro del historial, o el asistente en curso
+  const proposal = historyProposal?.calculation
+    ? { inputs: historyProposal as ScopingInputs, calculation: historyProposal.calculation, code: historyProposal.code, id: historyProposal.id }
+    : calculation
+      ? { inputs: currentInputs, calculation, code: savedQuoteCode, id: lastSavedId }
+      : null;
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: '16px 20px' }}>
@@ -290,7 +360,7 @@ export const ScopingPage: React.FC = () => {
         </Paragraph>
       </div>
 
-      <Tabs 
+      <Tabs
         activeKey={activeMainTab}
         onChange={setActiveMainTab}
         items={[
@@ -304,7 +374,8 @@ export const ScopingPage: React.FC = () => {
             ),
             children: (
               <div>
-                <MeetingTimerHeader 
+                <MeetingTimerHeader
+                  key={`timer-${wizardSession}`}
                   archetypes={archetypes}
                   selectedArchetypeId={selectedArchetype?.id}
                   onSelectArchetype={handleSelectArchetype}
@@ -319,19 +390,23 @@ export const ScopingPage: React.FC = () => {
                 >
                   <Row gutter={[16, 16]}>
                     <Col xs={24} lg={15} xl={16}>
-                      <DiscoveryWizard 
+                      <DiscoveryWizard
+                        key={`wizard-${wizardSession}`}
                         form={form}
                         inputs={currentInputs}
                         onValuesChange={handleFormValuesChange}
                         selectedArchetype={selectedArchetype}
+                        customHoursEnabled={customHoursEnabled}
+                        onCustomHoursToggle={handleCustomHoursToggle}
                       />
                     </Col>
 
                     <Col xs={24} lg={9} xl={8}>
-                      <LiveScoringSidebar 
+                      <LiveScoringSidebar
                         calculation={calculation}
                         loading={isCalculating}
-                        onOpenProposal={() => setProposalModalVisible(true)}
+                        error={calculationError}
+                        onOpenProposal={handleOpenWizardProposal}
                         onSaveQuote={handleSaveQuote}
                         isSaving={isSaving}
                       />
@@ -350,30 +425,19 @@ export const ScopingPage: React.FC = () => {
               </span>
             ),
             children: (
-              <ScopingListTable 
+              <ScopingListTable
                 items={historyItems}
                 kpis={kpis}
                 loading={historyLoading}
                 onViewProposal={handleViewProposalFromHistory}
-                onEdit={(item) => {
-                  handleViewProposalFromHistory(item);
-                  setActiveMainTab('wizard');
-                }}
+                onEdit={handleEditFromHistory}
                 onDelete={handleDeleteFromHistory}
                 onConvertToProject={(id) => handleConvertToProject(id)}
-                onSearchChange={setSearchFilter}
+                onSearchChange={handleSearchChange}
                 onStatusFilterChange={setStatusFilter}
                 searchValue={searchFilter}
                 statusFilter={statusFilter}
-                onNewScoping={() => {
-                  form.resetFields();
-                  setLastSavedId(null);
-                  setSelectedArchetype(undefined);
-                  setCurrentInputs(DEFAULT_INPUTS);
-                  form.setFieldsValue(DEFAULT_INPUTS);
-                  triggerCalculate(DEFAULT_INPUTS);
-                  setActiveMainTab('wizard');
-                }}
+                onNewScoping={handleNewScoping}
               />
             )
           }
@@ -381,20 +445,20 @@ export const ScopingPage: React.FC = () => {
       />
 
       {/* Modal de Propuesta Técnico-Económica */}
-      {calculation && (
+      {proposal && (
         <TechnicalEconomicProposalModal
           visible={proposalModalVisible}
           onClose={() => setProposalModalVisible(false)}
-          inputs={currentInputs}
-          calculation={calculation}
-          quoteCode={savedQuoteCode}
-          onConvertToProject={() => handleConvertToProject()}
+          inputs={proposal.inputs}
+          calculation={proposal.calculation}
+          quoteCode={proposal.code}
+          onConvertToProject={() => handleConvertToProject(proposal.id ?? undefined)}
           isConverting={isConverting}
         />
       )}
 
       {/* Modal de Preguntas Guía del Arquetipo */}
-      <ScopingArchetypeQuestionsModal 
+      <ScopingArchetypeQuestionsModal
         visible={archetypeModalVisible}
         onClose={() => setArchetypeModalVisible(false)}
         archetype={selectedArchetype}
