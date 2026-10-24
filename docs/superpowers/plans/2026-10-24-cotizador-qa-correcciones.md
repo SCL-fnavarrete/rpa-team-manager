@@ -4,7 +4,7 @@
 
 **Goal:** Corregir los defectos críticos e importantes que el recorrido en navegador encontró en el Cotizador RPA, para que lo guardado coincida con lo mostrado, editar no destruya datos, "Convertir en Proyecto" funcione y el módulo respete los permisos de costos/márgenes.
 
-**Architecture:** Cinco tareas secuenciales (las 4 y 5 se agregaron tras la revisión final de la Fase 6G): (Task 1) backend — validación, permisos con saneamiento de costos internos, semántica de actualización con horas manuales persistidas, conversión a proyecto transaccional, tarifas por moneda; (Task 2) frontend — formulario/estado del wizard (guardar y editar sin pérdida, monedas, errores visibles); (Task 3) frontend — propuesta, impresión, textos, tema y visibilidad por rol; (Task 4) Centro PMO ejecutivo — costos y márgenes solo para `team_lead`.
+**Architecture:** Seis tareas secuenciales (las 4, 5 y 6 se agregaron tras la revisión final de la Fase 6G y la revisión de la Task 4): (Task 1) backend — validación, permisos con saneamiento de costos internos, semántica de actualización con horas manuales persistidas, conversión a proyecto transaccional, tarifas por moneda; (Task 2) frontend — formulario/estado del wizard (guardar y editar sin pérdida, monedas, errores visibles); (Task 3) frontend — propuesta, impresión, textos, tema y visibilidad por rol; (Task 4) Centro PMO ejecutivo — costos y márgenes solo para `team_lead`.
 
 **Tech Stack:** Node/Express/SQLite3/Jest (backend), React 18 + Ant Design v5 + Vitest (frontend).
 
@@ -170,6 +170,32 @@ Origen: la ola de correcciones final de la Fase 6G encontró que `createProjectF
 - [ ] **Step 3: Implementar** el cambio del insert y la migración 49 (nunca editar migraciones anteriores).
 - [ ] **Step 4: Verificar** — `cd backend && npm test && npx tsc --noEmit && npm run lint` — Expected: PASS y sin errores.
 - [ ] **Step 5: Commit** — `fix(proyectos): crear desde cotización fija la etapa comercial aprobada y corrige filas existentes`
+
+---
+
+### Task 6: Seguridad del PMO — inyección SQL en métricas y presupuesto/costos en dashboard, analytics y gantt
+
+Origen: la revisión de la Task 4 (2026-10-24) y la revisión de seguridad automática encontraron, en código anterior a este trabajo, (a) una inyección SQL: `updateProjectMetrics` en `backend/src/controllers/pmoController.ts` (~líneas 826-829 y 849-853) interpola las CLAVES del cuerpo de la petición como nombres de columna (`sanitizeInput` limpia valores, no claves) y la respuesta devuelve `SELECT *`; accesible a `team_lead` y `rpa_operations` por `POST /api/pmo/projects/:id/metrics`; y (b) que `GET /api/pmo/dashboard`, `GET /api/pmo/analytics` y `GET /api/pmo/projects/:id/gantt` (este último abierto también a `rpa_developer` por `pmoReadRoles`) devuelven presupuesto y costos (`projects.budget`, `planned_budget`, `actual_cost`, `cost_variance_percentage`, `total_planned_budget`, `total_actual_cost`, `overall_budget_variance`, `budget_planned`, `budget_spent`, `budgetAnalysis`, `total_budget_managed`, `avg_budget_variance`) a roles que no son `team_lead`, contra la decisión 7 y la decisión de la Fase 6a (el presupuesto interno solo lo ve `team_lead`). La pestaña "Análisis" de `frontend/src/pages/pmo/PMODashboard.tsx` (~1629-1688) los muestra sin chequeo de rol.
+
+**Files:**
+- Modify: `backend/src/controllers/pmoController.ts`, `backend/src/routes/pmoRoutes.ts` (solo si hace falta)
+- Modify: `frontend/src/pages/pmo/PMODashboard.tsx` (ocultar lo que el backend omite) y los tipos en `frontend/src/types/pmo.ts` si aplica
+- Test: `backend/src/__tests__/controllers/pmoController.metricsInjection.test.ts` (crear, SQLite real), `backend/src/__tests__/controllers/pmoController.budgetVisibility.test.ts` (crear, SQLite real), test frontend de la pestaña Análisis solo si hay molde barato (usa ByText/ByLabelText)
+
+**Interfaces:**
+- Produces: `updateProjectMetrics` solo acepta una lista blanca de columnas de `project_pmo_metrics` (las que hoy usa legítimamente el frontend/`pmoRoutes`); cualquier otra clave → 400 en español sin tocar la BD; nunca se interpola una clave del cliente en SQL; la respuesta no devuelve campos fuera de la lista blanca para roles ≠ `team_lead`.
+- Produces: para roles ≠ `team_lead`, `/pmo/dashboard`, `/pmo/analytics` y `/pmo/projects/:id/gantt` omiten presupuesto y costos (lista arriba; revisa el código real por más claves) con una función pura reutilizable (`stripFinancials` de la Task 4 si encaja, o una análoga), fail-closed si el rol falta; `team_lead` recibe todo igual que hoy. El frontend oculta tarjetas/columnas/gráficos de presupuesto cuando el dato no viene (sin `NaN`, sin huecos).
+- Produces (menores de la Task 4, mismo commit si es simple): `top_risk_projects` para roles ≠ `team_lead` se ordena sin `cost_variance_clp` (por salud, atraso y riesgo) y la `severity` del scope creep para esos roles se basa solo en horas; los agregados de facturación de `getPMOExecutiveSuite` (`invoiceAggregates`) no duplican facturas por el JOIN con `payments`, excluyen `draft`/`cancelled` y convierten moneda con `financeService.toCLP`, igual que `portfolioService`.
+
+- [ ] **Step 1: Escribir tests que fallan**
+  - Inyección: `POST /projects/:id/metrics` con una clave maliciosa (p. ej. `"planned_budget = 0, actual_cost"` o `"x) VALUES (1); DROP TABLE users; --"`) responde 400, no modifica ninguna tabla (verificar `users` y `project_pmo_metrics` intactas) y no filtra datos; con claves válidas funciona como antes.
+  - Visibilidad: `rpa_operations` y `rpa_developer` (gantt) no reciben ninguna clave con `budget`, `cost`, `planned_budget`, `actual_cost` (verificar recursivamente con la lista documentada en el test); `team_lead` sigue recibiéndolas.
+  - Facturación consolidada: `invoiced_clp` de `/executive-suite` coincide con el de `portfolioService.getPortfolio()` para una factura con 2 pagos, una factura `draft` y una en USD.
+  - `top_risk_projects` de `rpa_operations` no depende del costo (dos proyectos con distinto sobrecosto y mismo atraso conservan un orden determinista que no usa el costo).
+- [ ] **Step 2: Correr y ver el fallo** — `cd backend && npx jest src/__tests__/controllers/pmoController.metricsInjection.test.ts src/__tests__/controllers/pmoController.budgetVisibility.test.ts` — Expected: FAIL.
+- [ ] **Step 3: Implementar** según las Interfaces. No cambiar qué roles pueden abrir cada ruta.
+- [ ] **Step 4: Verificar** — `cd backend && npm test && npx tsc --noEmit && npm run lint`; `cd frontend && npx tsc --noEmit && npm run check:theme && npm run lint` y los tests PMO frontend existentes. Expected: PASS y sin errores.
+- [ ] **Step 5: Commit** — `fix(pmo): corrige inyección SQL en métricas y oculta presupuesto/costos de dashboard, analytics y gantt a quien no es team_lead`
 
 ---
 
