@@ -107,9 +107,9 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
             key: 'gate0',
             forceRender: true,
             label: (
-              <span>
+              <span title="Minutos 1-4: Factibilidad y Gate 0">
                 <SafetyCertificateOutlined />
-                Paso 1: Factibilidad & Gate 0 (Min 1-4)
+                1 Factibilidad
               </span>
             ),
             children: (
@@ -276,9 +276,9 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
             key: 'systems',
             forceRender: true,
             label: (
-              <span>
+              <span title="Minutos 5-8: Sistemas y complejidad">
                 <DesktopOutlined />
-                Paso 2: Sistemas & Complejidad (Min 5-8)
+                2 Sistemas
               </span>
             ),
             children: (
@@ -378,7 +378,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
 
                 {/* Factores Multiplicadores Clave */}
                 <Title level={5} style={{ marginBottom: 12 }}>
-                  Factores Multiplicadores de Riesgo y Esfuerzo
+                  Factores que Elevan la Dificultad del Proceso
                 </Title>
 
                 <Row gutter={[16, 12]}>
@@ -388,7 +388,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                       borderRadius: 8, 
                       border: `1px solid ${token.colorBorderSecondary}`,
                       backgroundColor: inputs.uses_vdi 
-                        ? (isDark ? 'rgba(250, 140, 22, 0.12)' : '#fff7e6') 
+                        ? token.colorWarningBg 
                         : (isDark ? 'rgba(255, 255, 255, 0.02)' : token.colorFillAlter)
                     }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -399,7 +399,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                           </Space>
                           <div style={{ fontSize: 12, marginTop: 4 }}>
                             <Text type="secondary">
-                              Aumenta el esfuerzo en un 60% (x1.6) al no disponer de selectores nativos del SO.
+                              Eleva el puntaje de dificultad (x1,6) por no disponer de selectores nativos del SO; puede subir el nivel de esfuerzo, pero no suma horas por sí solo.
                             </Text>
                           </div>
                         </div>
@@ -416,7 +416,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                       borderRadius: 8, 
                       border: `1px solid ${token.colorBorderSecondary}`,
                       backgroundColor: inputs.requires_ocr 
-                        ? (isDark ? 'rgba(114, 46, 209, 0.12)' : '#f9f0ff') 
+                        ? token.colorInfoBg 
                         : (isDark ? 'rgba(255, 255, 255, 0.02)' : token.colorFillAlter)
                     }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -427,7 +427,7 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
                           </Space>
                           <div style={{ fontSize: 12, marginTop: 4 }}>
                             <Text type="secondary">
-                              Aumenta el esfuerzo en un 20% (x1.2) por calibración de motor documental y modelos de extracción.
+                              Eleva el puntaje de dificultad (x1,2) por la calibración del motor documental y los modelos de extracción; puede subir el nivel de esfuerzo, pero no suma horas por sí solo.
                             </Text>
                           </div>
                         </div>
@@ -445,9 +445,9 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
             key: 'volume',
             forceRender: true,
             label: (
-              <span>
+              <span title="Minutos 9-12: Volumetría y ROI">
                 <RiseOutlined />
-                Paso 3: Volumetría & ROI (Min 9-12)
+                3 Volumetría
               </span>
             ),
             children: (
@@ -561,9 +561,9 @@ export const DiscoveryWizard: React.FC<DiscoveryWizardProps> = ({
             key: 'proposal',
             forceRender: true,
             label: (
-              <span>
+              <span title="Minutos 13-15: Propuesta y cubicación">
                 <DollarOutlined />
-                Paso 4: Propuesta & Cubicación (Min 13-15)
+                4 Propuesta
               </span>
             ),
             children: (

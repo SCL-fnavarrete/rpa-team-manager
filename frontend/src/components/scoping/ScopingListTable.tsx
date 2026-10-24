@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { 
   Table, 
   Tag, 
@@ -30,8 +30,20 @@ import {
   FileTextOutlined
 } from '@ant-design/icons';
 import { ScopingQuotationRecord, ScopingKpis } from '../../types/scoping';
+import { formatSpanishNumber } from '../../utils/numberFormat';
+import { formatMoney } from '../../utils/scopingFormat';
+import {
+  canConvertScoping,
+  canDeleteScoping,
+  canModifyScoping,
+  canSeeInternalCosts,
+  isConvertibleRecord
+} from '../../utils/scopingPermissions';
 
 const { Text } = Typography;
+
+// Valor de un indicador sin datos: mejor un guion que un 0% o un monto en cero que parecen resultados reales
+const NO_DATA = '—';
 
 interface ScopingListTableProps {
   items: ScopingQuotationRecord[];
@@ -46,6 +58,8 @@ interface ScopingListTableProps {
   searchValue: string;
   statusFilter?: string;
   onNewScoping: () => void;
+  // Usuario de la sesión: decide qué acciones y qué costos se muestran (costos internos solo team_lead)
+  currentUser?: { id?: number; role?: string } | null;
 }
 
 export const ScopingListTable: React.FC<ScopingListTableProps> = ({
@@ -60,7 +74,8 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
   onStatusFilterChange,
   searchValue,
   statusFilter,
-  onNewScoping
+  onNewScoping,
+  currentUser
 }) => {
   const { token } = theme.useToken();
   const isDark = typeof document !== 'undefined' && (
@@ -69,6 +84,15 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
     token.colorBgContainer === '#171718' ||
     token.colorBgElevated === '#262626'
   );
+  const showInternalCosts = canSeeInternalCosts(currentUser);
+
+  // Monto propuesto por moneda: sumar pesos con dólares y UF daría una cifra sin sentido.
+  // `items` es la lista completa (la tabla pagina en el cliente), así que coincide con los demás indicadores.
+  const amountsByCurrency = useMemo(() => {
+    const totals = new Map<string, number>();
+    items.forEach((item) => totals.set(item.currency, (totals.get(item.currency) ?? 0) + (item.proposed_price || 0)));
+    return Array.from(totals.entries()).sort(([a], [b]) => (a === 'CLP' ? -1 : b === 'CLP' ? 1 : a.localeCompare(b)));
+  }, [items]);
 
   const viabilityTag = (status: string) => {
     switch (status) {
@@ -162,7 +186,7 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
       width: 140,
       render: (_: any, record: ScopingQuotationRecord) => (
         <div>
-          <Text strong>{record.total_hours} HH</Text>
+          <Text strong>{`${formatSpanishNumber(record.total_hours)} HH`}</Text>
           <div style={{ fontSize: 12 }}>
             <Text type="secondary">{record.estimated_weeks} semanas</Text>
           </div>
@@ -178,11 +202,13 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
       render: (price: number, record: ScopingQuotationRecord) => (
         <div>
           <Text strong style={{ color: token.colorSuccess }}>
-            {record.currency} {price.toLocaleString('es-CL')}
+            {formatMoney(price, record.currency)}
           </Text>
-          <div style={{ fontSize: 11 }}>
-            <Text type="secondary">Margen ~{record.projected_margin_pct}%</Text>
-          </div>
+          {showInternalCosts && record.projected_margin_pct !== undefined && (
+            <div style={{ fontSize: 11 }}>
+              <Text type="secondary">{`Margen ~${formatSpanishNumber(record.projected_margin_pct)}%`}</Text>
+            </div>
+          )}
         </div>
       )
     },
@@ -198,54 +224,58 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
       key: 'actions',
       width: 150,
       align: 'right' as const,
-      render: (_: any, record: ScopingQuotationRecord) => (
-        <Space size={4}>
-          <Tooltip title="Ver Propuesta Técnico-Económica">
-            <Button 
-              size="small" 
-              icon={<EyeOutlined />} 
-              onClick={() => onViewProposal(record)} 
-            />
-          </Tooltip>
-
-          {record.status !== 'converted_to_project' && (
-            <Tooltip title="Editar Levantamiento">
+      render: (_: any, record: ScopingQuotationRecord) => {
+        const isConverted = record.status === 'converted_to_project';
+        return (
+          <Space size={4}>
+            <Tooltip title="Ver Propuesta Técnico-Económica">
               <Button 
                 size="small" 
-                icon={<EditOutlined />} 
-                onClick={() => onEdit(record)} 
+                icon={<EyeOutlined />} 
+                onClick={() => onViewProposal(record)} 
               />
             </Tooltip>
-          )}
 
-          {record.status !== 'converted_to_project' && (
-            <Tooltip title="Convertir a Proyecto Formal">
-              <Button 
-                size="small" 
-                type="primary"
-                icon={<RocketOutlined />} 
-                onClick={() => onConvertToProject(record.id)} 
-              />
-            </Tooltip>
-          )}
+            {!isConverted && canModifyScoping(currentUser, record) && (
+              <Tooltip title="Editar Levantamiento">
+                <Button 
+                  size="small" 
+                  icon={<EditOutlined />} 
+                  onClick={() => onEdit(record)} 
+                />
+              </Tooltip>
+            )}
 
-          {record.status !== 'converted_to_project' && (
-            <Popconfirm
-              title="¿Eliminar este levantamiento?"
-              description="Esta acción eliminará el registro de cotización."
-              onConfirm={() => onDelete(record.id)}
-              okText="Eliminar"
-              cancelText="Cancelar"
-            >
-              <Button 
-                size="small" 
-                danger 
-                icon={<DeleteOutlined />} 
-              />
-            </Popconfirm>
-          )}
-        </Space>
-      )
+            {!isConverted && canConvertScoping(currentUser) && (
+              <Tooltip title={isConvertibleRecord(record) ? 'Convertir a Proyecto Formal' : 'Solo se puede convertir un levantamiento viable para RPA'}>
+                <Button 
+                  size="small" 
+                  type="primary"
+                  icon={<RocketOutlined />} 
+                  disabled={!isConvertibleRecord(record)}
+                  onClick={() => onConvertToProject(record.id)} 
+                />
+              </Tooltip>
+            )}
+
+            {canDeleteScoping(currentUser, record) && (
+              <Popconfirm
+                title="¿Eliminar este levantamiento?"
+                description="Esta acción eliminará el registro de cotización."
+                onConfirm={() => onDelete(record.id)}
+                okText="Eliminar"
+                cancelText="Cancelar"
+              >
+                <Button 
+                  size="small" 
+                  danger 
+                  icon={<DeleteOutlined />} 
+                />
+              </Popconfirm>
+            )}
+          </Space>
+        );
+      }
     }
   ];
 
@@ -264,6 +294,7 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
             <Statistic 
               title={<Text type="secondary" style={{ fontSize: 12 }}>Levantamientos Realizados</Text>}
               value={kpis.total_scopings}
+              formatter={(val) => formatSpanishNumber(Number(val))}
               prefix={<FileTextOutlined style={{ color: token.colorPrimary }} />}
             />
           </Card>
@@ -280,7 +311,7 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
             <Statistic 
               title={<Text type="secondary" style={{ fontSize: 12 }}>Tasa de Viabilidad RPA</Text>}
               value={kpis.viable_percentage}
-              suffix="%"
+              formatter={(val) => (kpis.total_scopings > 0 ? `${formatSpanishNumber(Number(val))}%` : NO_DATA)}
               prefix={<CheckCircleOutlined style={{ color: token.colorSuccess }} />}
               valueStyle={{ color: token.colorSuccess }}
             />
@@ -298,6 +329,7 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
             <Statistic 
               title={<Text type="secondary" style={{ fontSize: 12 }}>Total Horas Cotizadas</Text>}
               value={kpis.total_quoted_hours}
+              formatter={(val) => formatSpanishNumber(Number(val))}
               suffix="HH"
               prefix={<CalculatorOutlined style={{ color: token.colorWarning }} />}
             />
@@ -314,9 +346,19 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
           >
             <Statistic 
               title={<Text type="secondary" style={{ fontSize: 12 }}>Monto Total Propuesto</Text>}
-              value={kpis.total_proposed_amount}
               prefix={<DollarOutlined style={{ color: token.colorPrimary }} />}
-              formatter={(val) => `$ ${Number(val).toLocaleString('es-CL')}`}
+              valueStyle={amountsByCurrency.length > 1 ? { fontSize: 16, lineHeight: 1.4 } : undefined}
+              formatter={() => {
+                if (amountsByCurrency.length === 0) return NO_DATA;
+                if (amountsByCurrency.length === 1) return formatMoney(amountsByCurrency[0][1], amountsByCurrency[0][0]);
+                return (
+                  <div>
+                    {amountsByCurrency.map(([currency, total]) => (
+                      <div key={currency}>{formatMoney(total, currency)}</div>
+                    ))}
+                  </div>
+                );
+              }}
             />
           </Card>
         </Col>

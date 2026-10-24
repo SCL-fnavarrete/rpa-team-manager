@@ -12,6 +12,8 @@ import {
   FilePdfOutlined
 } from '@ant-design/icons';
 import { ScopingCalculationResult } from '../../types/scoping';
+import { formatSpanishNumber } from '../../utils/numberFormat';
+import { formatMoney, paybackLabel } from '../../utils/scopingFormat';
 
 const { Text, Title } = Typography;
 
@@ -25,6 +27,8 @@ interface LiveScoringSidebarProps {
   onOpenProposal: () => void;
   onSaveQuote: () => void;
   isSaving?: boolean;
+  // Costo interno y margen solo los ve team_lead: sin esta señal el panel no los dibuja aunque lleguen en la respuesta
+  showInternalCosts?: boolean;
 }
 
 export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
@@ -34,7 +38,8 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
   onRetry,
   onOpenProposal,
   onSaveQuote,
-  isSaving = false
+  isSaving = false,
+  showInternalCosts = false
 }) => {
   const { token } = theme.useToken();
   const isDark = typeof document !== 'undefined' && (
@@ -97,9 +102,12 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
   };
   const currentEffort = effortConfig[calculation.effort_level] || effortConfig.medium;
 
-  const formatCurrency = (val: number, cur: string) => {
-    return `${cur} ${val.toLocaleString('es-CL')}`;
-  };
+  // VDI y OCR solo multiplican el puntaje de dificultad (el nivel de esfuerzo, y con él las horas, salta por tramos):
+  // el aviso solo se muestra si el puntaje realmente se movió (no si ya estaba en el tope)
+  const factorsRaisedDifficulty =
+    (calculation.vdi_multiplier > 1 || calculation.ocr_multiplier > 1) &&
+    calculation.difficulty_score > calculation.complexity_score;
+  const score = (value: number) => formatSpanishNumber(value, { decimals: 2 });
 
   return (
     <Card 
@@ -149,12 +157,12 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
       </div>
 
       {/* 2. Multiplicadores técnicos activos */}
-      {(calculation.vdi_multiplier > 1.0 || calculation.ocr_multiplier > 1.0) && (
+      {factorsRaisedDifficulty && (
         <div style={{ 
           marginBottom: 14, 
           padding: '8px 12px', 
           borderRadius: 6,
-          backgroundColor: isDark ? 'rgba(250, 140, 22, 0.12)' : '#fff7e6',
+          backgroundColor: token.colorWarningBg,
           border: `1px dashed ${token.colorWarning}`
         }}>
           <Text strong style={{ fontSize: 12, color: token.colorWarning }}>
@@ -163,14 +171,19 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
           <div style={{ marginTop: 4, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             {calculation.vdi_multiplier > 1.0 && (
               <Tag color="volcano" icon={<LockOutlined />}>
-                VDI / Citrix: +60% esfuerzo
+                {`VDI / Citrix: sube la dificultad (x${formatSpanishNumber(calculation.vdi_multiplier)})`}
               </Tag>
             )}
             {calculation.ocr_multiplier > 1.0 && (
               <Tag color="purple" icon={<FilePdfOutlined />}>
-                OCR / Escaneados: +20% esfuerzo
+                {`OCR / Escaneados: sube la dificultad (x${formatSpanishNumber(calculation.ocr_multiplier)})`}
               </Tag>
             )}
+          </div>
+          <div style={{ marginTop: 6 }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {`Puntaje de dificultad: de ${score(calculation.complexity_score)} a ${score(calculation.difficulty_score)}. Nivel de esfuerzo resultante: ${calculation.effort_label}.`}
+            </Text>
           </div>
         </div>
       )}
@@ -188,7 +201,7 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
             <Text type="secondary" style={{ fontSize: 12 }}>Cubicación Total</Text>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
               <Title level={2} style={{ margin: 0, color: token.colorPrimary }}>
-                {calculation.total_hours}
+                {formatSpanishNumber(calculation.total_hours)}
               </Title>
               <Text strong>HH</Text>
             </div>
@@ -214,7 +227,7 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
           {calculation.roles_breakdown.map((r) => (
             <div key={r.role_code} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
               <Text type="secondary">{r.role_name}:</Text>
-              <Text strong>{r.total_hours} HH ({r.fte_equivalent} FTE)</Text>
+              <Text strong>{`${formatSpanishNumber(r.total_hours)} HH (${formatSpanishNumber(r.fte_equivalent)} FTE)`}</Text>
             </div>
           ))}
         </div>
@@ -231,17 +244,17 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Text type="secondary" style={{ fontSize: 12 }}>Precio Sugerido Venta</Text>
           <Text strong style={{ fontSize: 16, color: token.colorSuccess }}>
-            {formatCurrency(calculation.proposed_price, calculation.currency)}
+            {formatMoney(calculation.proposed_price, calculation.currency)}
           </Text>
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 4 }}>
           <Text type="secondary">Tarifa venta aplicada:</Text>
-          <Text>{formatCurrency(calculation.target_hourly_rate, calculation.currency)}/h</Text>
+          <Text>{`${formatMoney(calculation.target_hourly_rate, calculation.currency)}/h`}</Text>
         </div>
-        {calculation.projected_margin_pct !== undefined && (
+        {showInternalCosts && calculation.projected_margin_pct !== undefined && (
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 2 }}>
             <Text type="secondary">Margen estimado:</Text>
-            <Text strong style={{ color: token.colorSuccess }}>{calculation.projected_margin_pct}%</Text>
+            <Text strong style={{ color: token.colorSuccess }}>{`${formatSpanishNumber(calculation.projected_margin_pct)}%`}</Text>
           </div>
         )}
 
@@ -254,17 +267,17 @@ export const LiveScoringSidebar: React.FC<LiveScoringSidebarProps> = ({
             <Text strong style={{ fontSize: 12 }}>Ahorro Anual Cliente:</Text>
           </Space>
           <Text strong style={{ color: token.colorWarning }}>
-            {formatCurrency(calculation.client_annual_savings, calculation.currency)}
+            {formatMoney(calculation.client_annual_savings, calculation.currency)}
           </Text>
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 4 }}>
           <Text type="secondary">Horas manuales liberadas:</Text>
-          <Text strong>{calculation.hours_saved_annual.toLocaleString()} h/año</Text>
+          <Text strong>{`${formatSpanishNumber(calculation.hours_saved_annual)} h/año`}</Text>
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 2 }}>
           <Text type="secondary">Retorno de inversión (Payback):</Text>
           <Text strong style={{ color: token.colorPrimary }}>
-            {calculation.payback_months > 0 ? `${calculation.payback_months} meses` : 'Inmediato'}
+            {paybackLabel(calculation)}
           </Text>
         </div>
       </div>

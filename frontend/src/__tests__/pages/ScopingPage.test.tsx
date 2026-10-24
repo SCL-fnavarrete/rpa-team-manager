@@ -17,6 +17,12 @@ vi.mock('@/services/scopingService', () => ({
   }
 }));
 
+// Rol y usuario de la sesión: cada prueba puede cambiarlos (por defecto team_lead, que ve todo)
+const authState = vi.hoisted(() => ({ user: { id: 1, role: 'team_lead' } as { id: number; role: string } | null }));
+vi.mock('@/store/authStore', () => ({
+  useAuthStore: () => ({ user: authState.user })
+}));
+
 import { scopingService } from '@/services/scopingService';
 import { ScopingPage } from '@/pages/scoping/ScopingPage';
 import type { RPAArchetype, ScopingCalculationResult, ScopingInputs, ScopingQuotationRecord } from '@/types/scoping';
@@ -92,7 +98,7 @@ const FACTURAS = 'Contabilización de Facturas de Proveedores (DTE / FCR) (Finan
 const RECEPCION_OC = 'Recepción y Procesamiento de Órdenes de Compra de Clientes (Ventas)';
 
 // Un cálculo cuyo resultado depende de las entradas recibidas: con OCR/VDI sube a 492 HH (como el motor real)
-const makeCalculation = (inputs: Partial<ScopingInputs> = {}): ScopingCalculationResult => {
+const makeCalculation = (inputs: Partial<ScopingInputs> = {}, overrides: Partial<ScopingCalculationResult> = {}): ScopingCalculationResult => {
   const heavy = Boolean(inputs.requires_ocr || inputs.uses_vdi);
   const currency = inputs.currency ?? 'CLP';
   const rate = inputs.target_hourly_rate ?? 36000;
@@ -141,7 +147,8 @@ const makeCalculation = (inputs: Partial<ScopingInputs> = {}): ScopingCalculatio
     client_annual_manual_cost: 56000000,
     client_annual_savings: 52000000,
     payback_months: 3,
-    roi_first_year_pct: 300
+    roi_first_year_pct: 300,
+    ...overrides
   };
 };
 
@@ -254,6 +261,7 @@ describe('ScopingPage', () => {
 
   beforeEach(() => {
     user = userEvent.setup({ pointerEventsCheck: 0 });
+    authState.user = { id: 1, role: 'team_lead' };
     vi.clearAllMocks();
     // Los avisos de antd se espían (no se dibujan): evita advertencias de act() y permite verificar el texto exacto
     vi.spyOn(message, 'success').mockImplementation(() => undefined as any);
@@ -444,7 +452,7 @@ describe('ScopingPage', () => {
     it('cambiar moneda a USD reemplaza las tarifas por las de USD (no deja las de CLP) y el rótulo coincide con los montos', async () => {
       renderPage();
       await waitForPanel();
-      await openTab(/Paso 4/);
+      await openTab(/4 Propuesta/);
 
       expect(screen.getByLabelText(/Tarifa Venta por Hora/)).toHaveDisplayValue('36000');
 
@@ -478,7 +486,7 @@ describe('ScopingPage', () => {
     it('los campos FTEs actuales, tasa de error y periodos punta muestran la leyenda "Solo referencia, no afecta el cálculo"', async () => {
       renderPage();
       await waitForPanel();
-      await openTab(/Paso 3/);
+      await openTab(/3 Volumetría/);
 
       const itemOf = (label: RegExp) => screen.getByText(label).closest('.ant-form-item') as HTMLElement;
       expect(within(itemOf(/Colaboradores Actuales \(FTEs\)/)).getByText(REFERENCE_HINT)).toBeInTheDocument();
@@ -499,7 +507,7 @@ describe('ScopingPage', () => {
       );
       renderPage();
       await waitForPanel();
-      await openTab(/Paso 3/);
+      await openTab(/3 Volumetría/);
 
       await user.clear(screen.getByLabelText(/Volumen por Ciclo/));
 
@@ -539,7 +547,7 @@ describe('ScopingPage', () => {
     it('el panel indica carga mientras calcula', async () => {
       renderPage();
       await waitForPanel();
-      await openTab(/Paso 3/);
+      await openTab(/3 Volumetría/);
 
       let resolveCalculation: (value: ScopingCalculationResult) => void = () => undefined;
       mocked.calculate.mockImplementationOnce(() => new Promise<ScopingCalculationResult>((resolve) => {
@@ -621,11 +629,182 @@ describe('ScopingPage', () => {
         const { projected_margin_pct: _margin, project_internal_cost: _cost, ...withoutCosts } = makeCalculation(inputs);
         return Promise.resolve(withoutCosts);
       });
-      await openTab(/Paso 3/);
+      await openTab(/3 Volumetría/);
       await user.type(screen.getByLabelText(/Tiempo Manual \(AHT\)/), '5');
 
       await waitFor(() => expect(screen.queryByText('Margen estimado:')).not.toBeInTheDocument());
       expect(screen.getByText('Guardar Cotización')).toBeInTheDocument();
+    });
+  });
+
+  describe('visibilidad por rol (I10)', () => {
+    it('un rpa_developer no ve el margen en el panel aunque la respuesta lo traiga; team_lead sí', async () => {
+      authState.user = { id: 5, role: 'rpa_developer' };
+      const view = renderPage();
+      await waitForPanel();
+      expect(screen.queryByText('Margen estimado:')).not.toBeInTheDocument();
+      // Lo que ve el cliente sigue visible
+      expect(screen.getByText('Precio Sugerido Venta')).toBeInTheDocument();
+      view.unmount();
+
+      authState.user = { id: 1, role: 'team_lead' };
+      renderPage();
+      await waitForPanel();
+      expect(screen.getByText('Margen estimado:')).toBeInTheDocument();
+    });
+
+    it('en el historial, un rpa_developer no ve el margen y solo puede editar y borrar lo propio', async () => {
+      authState.user = { id: 5, role: 'rpa_developer' };
+      mocked.getAll.mockResolvedValue({
+        success: true,
+        data: [
+          makeRecord({ id: 1, code: 'COT-2026-001', created_by: 5 }),
+          makeRecord({ id: 2, code: 'COT-2026-002', created_by: 9 })
+        ],
+        kpis: emptyKpis
+      });
+      renderPage();
+      await waitForPanel();
+      await openTab(/Historial de Cotizaciones/);
+      await screen.findByText('COT-2026-001');
+
+      expect(screen.queryByText(/Margen/)).not.toBeInTheDocument();
+      const own = screen.getByText('COT-2026-001').closest('tr') as HTMLElement;
+      const foreign = screen.getByText('COT-2026-002').closest('tr') as HTMLElement;
+      expect(within(own).getByLabelText('delete')).toBeInTheDocument();
+      expect(within(own).getByLabelText('edit')).toBeInTheDocument();
+      expect(within(foreign).queryByLabelText('delete')).not.toBeInTheDocument();
+      expect(within(foreign).queryByLabelText('edit')).not.toBeInTheDocument();
+      // Convertir en proyecto: el rol no puede, ni siquiera en lo propio
+      expect(within(own).queryByLabelText('rocket')).not.toBeInTheDocument();
+    });
+
+    it('en el historial, team_lead ve el margen y puede convertir una cotización viable', async () => {
+      renderPage();
+      await waitForPanel();
+      await openTab(/Historial de Cotizaciones/);
+      const row = (await screen.findByText('COT-2026-007')).closest('tr') as HTMLElement;
+
+      expect(within(row).getByText('Margen ~50%')).toBeInTheDocument();
+      expect(within(row).getByLabelText('rocket').closest('button')).toBeEnabled();
+    });
+
+    it('la propuesta del asistente ofrece convertir solo a team_lead y rpa_operations, y solo si ya está guardada', async () => {
+      authState.user = { id: 5, role: 'rpa_developer' };
+      const developerView = renderPage();
+      await waitForPanel();
+      await selectArchetype(FACTURAS);
+      await user.type(screen.getByLabelText(/Nombre del Cliente/), 'Acme');
+      await clickSave();
+      const devDialog = await proposalDialog();
+      expect(within(devDialog).getByText('COT-2026-009')).toBeInTheDocument();
+      expect(within(devDialog).queryByText(/Convertir en Proyecto/)).not.toBeInTheDocument();
+      developerView.unmount();
+
+      authState.user = { id: 2, role: 'rpa_operations' };
+      renderPage();
+      await waitForPanel();
+      // Sin guardar todavía no hay nada que convertir: el botón no se ofrece
+      await user.click(screen.getByText('Ver Propuesta Técnico-Económica'));
+      const unsavedDialog = await proposalDialog();
+      expect(within(unsavedDialog).queryByText(/Convertir en Proyecto/)).not.toBeInTheDocument();
+      await user.click(within(unsavedDialog).getByText('Cerrar'));
+
+      await selectArchetype(FACTURAS);
+      await user.type(screen.getByLabelText(/Nombre del Cliente/), 'Acme');
+      await clickSave();
+      const savedDialog = await proposalDialog();
+      expect(within(savedDialog).getByText(/Convertir en Proyecto/).closest('button')).toBeEnabled();
+    });
+
+    it('la propuesta de un registro no viable del historial no permite convertirlo', async () => {
+      mocked.getAll.mockResolvedValue({
+        success: true,
+        data: [makeRecord({ viability_status: 'not_viable' })],
+        kpis: emptyKpis
+      });
+      mocked.getById.mockResolvedValue(makeRecord({
+        viability_status: 'not_viable',
+        calculation: makeCalculation({}, {
+          viability_status: 'not_viable',
+          viability_label: 'No se puede automatizar con RPA',
+          is_viable: false,
+          blockers: ['Los datos de entrada no son digitales ni estructurados.']
+        })
+      }));
+      renderPage();
+      await waitForPanel();
+      await openTab(/Historial de Cotizaciones/);
+      const row = (await screen.findByText('COT-2026-007')).closest('tr') as HTMLElement;
+      expect(within(row).getByLabelText('rocket').closest('button')).toBeDisabled();
+
+      await user.click(within(row).getByLabelText('eye'));
+      const dialog = await proposalDialog();
+      expect(within(dialog).getByText('NO SE PUEDE AUTOMATIZAR CON RPA').closest('.ant-alert')).toHaveClass('ant-alert-error');
+      expect(within(dialog).queryByText('VALOR TOTAL DEL PROYECTO')).not.toBeInTheDocument();
+      expect(within(dialog).getByText(/Convertir en Proyecto/).closest('button')).toBeDisabled();
+    });
+
+    it('la propuesta de una cotización ya convertida no ofrece convertirla otra vez', async () => {
+      mocked.getById.mockResolvedValue(makeRecord({ status: 'converted_to_project', converted_project_id: 12 }));
+      renderPage();
+      await waitForPanel();
+      await openTab(/Historial de Cotizaciones/);
+      const row = (await screen.findByText('COT-2026-007')).closest('tr') as HTMLElement;
+      await user.click(within(row).getByLabelText('eye'));
+
+      const dialog = await proposalDialog();
+      expect(within(dialog).queryByText(/Convertir en Proyecto/)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('código y fecha de la propuesta (I7)', () => {
+    it('la propuesta del historial muestra el código y la fecha del registro, no la de hoy', async () => {
+      mocked.getById.mockResolvedValue(makeRecord({ created_at: '2025-01-15T12:00:00Z' }));
+      renderPage();
+      await waitForPanel();
+      await openTab(/Historial de Cotizaciones/);
+      const row = (await screen.findByText('COT-2026-007')).closest('tr') as HTMLElement;
+      await user.click(within(row).getByLabelText('eye'));
+
+      const dialog = await proposalDialog();
+      expect(within(dialog).getByText('COT-2026-007')).toBeInTheDocument();
+      expect(within(dialog).getByText(/Fecha: 15-01-2025/)).toBeInTheDocument();
+    });
+
+    it('un levantamiento sin guardar se rotula como borrador y, al guardarlo, toma el código y la fecha del registro', async () => {
+      mocked.create.mockResolvedValue(makeRecord({ id: 9, code: 'COT-2026-009', created_at: '2025-03-02T12:00:00Z' }));
+      renderPage();
+      await waitForPanel();
+
+      await user.click(screen.getByText('Ver Propuesta Técnico-Económica'));
+      const draftDialog = await proposalDialog();
+      expect(within(draftDialog).getByText('Borrador sin guardar')).toBeInTheDocument();
+      expect(within(draftDialog).queryByText(/COT-2026/)).not.toBeInTheDocument();
+      await user.click(within(draftDialog).getByText('Cerrar'));
+
+      await selectArchetype(FACTURAS);
+      await user.type(screen.getByLabelText(/Nombre del Cliente/), 'Acme');
+      await clickSave();
+
+      const savedDialog = await proposalDialog();
+      expect(within(savedDialog).getByText('COT-2026-009')).toBeInTheDocument();
+      expect(within(savedDialog).getByText(/Fecha: 02-03-2025/)).toBeInTheDocument();
+      expect(within(savedDialog).queryByText('Borrador sin guardar')).not.toBeInTheDocument();
+    });
+
+    it('al editar una cotización antigua, la propuesta conserva su código y su fecha originales', async () => {
+      mocked.getById.mockResolvedValue(makeRecord({ created_at: '2025-01-15T12:00:00Z' }));
+      renderPage();
+      await waitForPanel();
+      await openHistoryAndEdit();
+      await waitForPanel();
+
+      await user.click(screen.getByText('Ver Propuesta Técnico-Económica'));
+
+      const dialog = await proposalDialog();
+      expect(within(dialog).getByText('COT-2026-007')).toBeInTheDocument();
+      expect(within(dialog).getByText(/Fecha: 15-01-2025/)).toBeInTheDocument();
     });
   });
 
@@ -695,7 +874,7 @@ describe('ScopingPage', () => {
       expect(await screen.findByText('236')).toBeInTheDocument();
     });
 
-    it('reinicia cronómetro, vuelve al Paso 1 y limpia el código mostrado', async () => {
+    it('reinicia cronómetro, vuelve al paso 1 y limpia el código mostrado', async () => {
       renderPage();
       await waitForPanel();
 
@@ -710,15 +889,15 @@ describe('ScopingPage', () => {
       // La reunión avanza: cronómetro corriendo y el asistente en el Paso 3
       await user.click(screen.getByLabelText('play-circle'));
       expect(await screen.findByText('00:01', {}, { timeout: 3000 })).toBeInTheDocument();
-      await openTab(/Paso 3/);
-      expect(tabOf(/Paso 3/)).toHaveAttribute('aria-selected', 'true');
+      await openTab(/3 Volumetría/);
+      expect(tabOf(/3 Volumetría/)).toHaveAttribute('aria-selected', 'true');
 
       await openTab(/Historial de Cotizaciones/);
       await user.click(await screen.findByText(/Nuevo Levantamiento \(15 min\)/));
 
       expect(screen.getByText('00:00')).toBeInTheDocument();
       expect(screen.getByLabelText('play-circle')).toBeInTheDocument();
-      expect(tabOf(/Paso 1/)).toHaveAttribute('aria-selected', 'true');
+      expect(tabOf(/1 Factibilidad/)).toHaveAttribute('aria-selected', 'true');
       expect(screen.getByLabelText(/Nombre del Cliente/)).toHaveValue('');
 
       // El código de la cotización anterior no se arrastra a la propuesta nueva

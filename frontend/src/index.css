@@ -852,6 +852,35 @@ button, [role="button"], a, input, select, textarea, [tabindex]:not([tabindex="-
   .app-content { padding: 0 !important; }
   .dashboard-panel, .attention-panel, .finance-summary, .projects-stat-strip { box-shadow: none; }
 }
+/* Propuesta técnico-económica del Cotizador: TechnicalEconomicProposalModal marca el <body> con .proposal-printing
+   mientras se imprime. Sale solo `.proposal-print-area`: sin menú, asistente, máscara gris, marco ni botones del modal. */
+@media print {
+  /* Hoja blanca con texto oscuro siempre: en modo Noche el fondo oscuro de la app saldría impreso si el usuario activa "gráficos de fondo".
+     ThemeProvider fija color-scheme en línea sobre <html>; solo un !important le gana. */
+  html:has(body.proposal-printing) { color-scheme: light !important; background: Canvas !important; }
+  body.proposal-printing { overflow: visible !important; width: auto !important; height: auto !important; padding: 0 !important; background: Canvas !important; }
+  body.proposal-printing #root { display: none !important; }
+  /* Portales (modal, avisos): se oculta todo lo que cuelga del body salvo el que contiene la propuesta */
+  body.proposal-printing > *:not(:has(.proposal-print-area)) { display: none !important; }
+  body.proposal-printing .ant-modal-mask,
+  body.proposal-printing .ant-modal-close,
+  body.proposal-printing .ant-modal-footer { display: none !important; }
+  /* El modal deja de ser una ventana flotante recortada: ocupa el ancho de la hoja y fluye en varias páginas */
+  body.proposal-printing .ant-modal-wrap { position: static !important; overflow: visible !important; }
+  body.proposal-printing .ant-modal { position: static !important; width: 100% !important; max-width: none !important; margin: 0 !important; padding: 0 !important; top: 0 !important; transform: none !important; }
+  /* Con :root gana a `:root[data-theme="dark"] .ant-modal-content` (fondo oscuro con !important) */
+  :root body.proposal-printing .ant-modal-content { box-shadow: none !important; border: 0 !important; border-radius: 0 !important; padding: 0 !important; background: transparent !important; }
+  /* El cuerpo del modal tiene alto máximo con scroll interno (~70vh): sin soltarlo la propuesta sale cortada */
+  body.proposal-printing .ant-modal-body { max-height: none !important; overflow: visible !important; padding: 0 !important; }
+  body.proposal-printing .proposal-print-area { color-scheme: light; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body.proposal-printing .proposal-print-area .ant-card,
+  body.proposal-printing .proposal-print-area .ant-descriptions,
+  body.proposal-printing .proposal-print-area .ant-table-row,
+  body.proposal-printing .proposal-print-area .ant-alert { break-inside: avoid; }
+  /* En modo Noche el texto claro sobre papel blanco sería invisible: se imprime con los colores del sistema (negro sobre blanco) */
+  :root[data-theme="dark"] body.proposal-printing .proposal-print-area,
+  :root[data-theme="dark"] body.proposal-printing .proposal-print-area * { color: CanvasText !important; background-color: transparent !important; border-color: GrayText !important; }
+}
 .document-file-list .ant-list-item-meta-content,
 .document-file-list .ant-space-item { min-width: 0; max-width: 100%; }
 .document-file-list .ant-tag { white-space: normal; overflow-wrap: anywhere; }

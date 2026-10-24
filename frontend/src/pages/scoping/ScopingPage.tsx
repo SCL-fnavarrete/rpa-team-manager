@@ -24,6 +24,7 @@ import {
   ScopingKpis
 } from '../../types/scoping';
 import { scopingService } from '../../services/scopingService';
+import { useAuthStore } from '../../store/authStore';
 import {
   DEFAULT_INPUTS,
   ScopingCurrency,
@@ -33,6 +34,7 @@ import {
   ratesForCurrency,
   recordToFormValues
 } from '../../utils/scopingInputs';
+import { canConvertScoping, canSeeInternalCosts } from '../../utils/scopingPermissions';
 import { MeetingTimerHeader } from '../../components/scoping/MeetingTimerHeader';
 import { DiscoveryWizard } from '../../components/scoping/DiscoveryWizard';
 import { LiveScoringSidebar } from '../../components/scoping/LiveScoringSidebar';
@@ -48,6 +50,7 @@ const SEARCH_DEBOUNCE_MS = 400;
 export const ScopingPage: React.FC = () => {
   const { token } = theme.useToken();
   const navigate = useNavigate();
+  const { user } = useAuthStore();
   const [form] = Form.useForm();
 
   const [activeMainTab, setActiveMainTab] = useState<string>('wizard');
@@ -74,6 +77,8 @@ export const ScopingPage: React.FC = () => {
   // Modal de propuesta formal
   const [proposalModalVisible, setProposalModalVisible] = useState<boolean>(false);
   const [savedQuoteCode, setSavedQuoteCode] = useState<string | undefined>();
+  // Fecha de creación del levantamiento guardado; sin guardar, la propuesta es un borrador
+  const [savedQuoteDate, setSavedQuoteDate] = useState<string | undefined>();
   const [lastSavedId, setLastSavedId] = useState<number | null>(null);
   // Registro del historial que muestra la propuesta; null = la propuesta es la del asistente en curso
   const [historyProposal, setHistoryProposal] = useState<ScopingQuotationRecord | null>(null);
@@ -233,6 +238,7 @@ export const ScopingPage: React.FC = () => {
       }
 
       setSavedQuoteCode(savedRecord.code);
+      setSavedQuoteDate(savedRecord.created_at);
       setHistoryProposal(null);
       setProposalModalVisible(true);
     } catch (err: any) {
@@ -296,6 +302,7 @@ export const ScopingPage: React.FC = () => {
     setArchetypeId(record.process_archetype);
     setLastSavedId(record.id);
     setSavedQuoteCode(record.code);
+    setSavedQuoteDate(record.created_at);
     setHistoryProposal(null);
     setWizardSession((n) => n + 1);
     // Sin números ni error de la sesión anterior mientras calcula el nuevo registro
@@ -328,6 +335,7 @@ export const ScopingPage: React.FC = () => {
     form.resetFields();
     setLastSavedId(null);
     setSavedQuoteCode(undefined);
+    setSavedQuoteDate(undefined);
     setHistoryProposal(null);
     setArchetypeId(undefined);
     setCustomHoursEnabled(false);
@@ -346,10 +354,19 @@ export const ScopingPage: React.FC = () => {
 
   // Lo que muestra la propuesta: el registro del historial, o el asistente en curso
   const proposal = historyProposal?.calculation
-    ? { inputs: historyProposal as ScopingInputs, calculation: historyProposal.calculation, code: historyProposal.code, id: historyProposal.id }
+    ? {
+        inputs: historyProposal as ScopingInputs,
+        calculation: historyProposal.calculation,
+        code: historyProposal.code,
+        date: historyProposal.created_at,
+        id: historyProposal.id,
+        converted: historyProposal.status === 'converted_to_project'
+      }
     : calculation
-      ? { inputs: currentInputs, calculation, code: savedQuoteCode, id: lastSavedId }
+      ? { inputs: currentInputs, calculation, code: savedQuoteCode, date: savedQuoteDate, id: lastSavedId, converted: false }
       : null;
+  // Convertir exige permiso y un levantamiento guardado que aún no se haya convertido
+  const proposalId = proposal && !proposal.converted && canConvertScoping(user) ? proposal.id : null;
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: '16px 20px' }}>
@@ -416,6 +433,7 @@ export const ScopingPage: React.FC = () => {
                         onOpenProposal={handleOpenWizardProposal}
                         onSaveQuote={handleSaveQuote}
                         isSaving={isSaving}
+                        showInternalCosts={canSeeInternalCosts(user)}
                       />
                     </Col>
                   </Row>
@@ -445,6 +463,7 @@ export const ScopingPage: React.FC = () => {
                 searchValue={searchFilter}
                 statusFilter={statusFilter}
                 onNewScoping={handleNewScoping}
+                currentUser={user}
               />
             )
           }
@@ -459,7 +478,8 @@ export const ScopingPage: React.FC = () => {
           inputs={proposal.inputs}
           calculation={proposal.calculation}
           quoteCode={proposal.code}
-          onConvertToProject={() => handleConvertToProject(proposal.id ?? undefined)}
+          quoteDate={proposal.date}
+          onConvertToProject={proposalId ? () => handleConvertToProject(proposalId) : undefined}
           isConverting={isConverting}
         />
       )}
