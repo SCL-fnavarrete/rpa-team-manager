@@ -4,7 +4,7 @@
 
 **Goal:** Corregir los defectos críticos e importantes que el recorrido en navegador encontró en el Cotizador RPA, para que lo guardado coincida con lo mostrado, editar no destruya datos, "Convertir en Proyecto" funcione y el módulo respete los permisos de costos/márgenes.
 
-**Architecture:** Cuatro tareas secuenciales (la 4 se agregó tras la revisión final de la Fase 6G): (Task 1) backend — validación, permisos con saneamiento de costos internos, semántica de actualización con horas manuales persistidas, conversión a proyecto transaccional, tarifas por moneda; (Task 2) frontend — formulario/estado del wizard (guardar y editar sin pérdida, monedas, errores visibles); (Task 3) frontend — propuesta, impresión, textos, tema y visibilidad por rol; (Task 4) Centro PMO ejecutivo — costos y márgenes solo para `team_lead`.
+**Architecture:** Cinco tareas secuenciales (las 4 y 5 se agregaron tras la revisión final de la Fase 6G): (Task 1) backend — validación, permisos con saneamiento de costos internos, semántica de actualización con horas manuales persistidas, conversión a proyecto transaccional, tarifas por moneda; (Task 2) frontend — formulario/estado del wizard (guardar y editar sin pérdida, monedas, errores visibles); (Task 3) frontend — propuesta, impresión, textos, tema y visibilidad por rol; (Task 4) Centro PMO ejecutivo — costos y márgenes solo para `team_lead`.
 
 **Tech Stack:** Node/Express/SQLite3/Jest (backend), React 18 + Ant Design v5 + Vitest (frontend).
 
@@ -151,6 +151,25 @@ Origen: la revisión final de la Fase 6G (2026-10-24) encontró que `GET /api/pm
   Run: `cd backend && npx jest src/__tests__/controllers/pmoController.executiveSuite.test.ts && npm test && npx tsc --noEmit && npm run lint`; `cd frontend && npx tsc --noEmit && npm run check:theme && npm run lint` y los tests de las vistas PMO si existen.
   Expected: PASS y sin errores.
 - [ ] **Step 5: Commit** — `fix(pmo): costos y márgenes del Centro PMO solo para team_lead y cifras alineadas con la cartera`
+
+---
+
+### Task 5: "Crear proyecto desde cotización" fija la etapa comercial aprobada
+
+Origen: la ola de correcciones final de la Fase 6G encontró que `createProjectFromQuote` (`backend/src/controllers/projectController.ts`, ~línea 1361) inserta el proyecto `active` sin fijar `commercial_stage`; el default de BD lo deja en `'quoting'` y los proyectos creados así solo cuentan como "venta realizada" en la cartera gracias a una regla puente (`quoting` + `status` `active`/`completed`, `backend/src/services/portfolioService.ts` y `frontend/src/utils/saleRealization.ts`). La regla puente se mantiene; esta tarea corrige la causa.
+
+**Files:**
+- Modify: `backend/src/controllers/projectController.ts` (`createProjectFromQuote`: insertar `commercial_stage = 'approved'` y `client_approved_at = datetime('now')`)
+- Modify: `backend/src/database/migrationList.ts` (migración 49: `UPDATE projects SET commercial_stage = 'approved', client_approved_at = COALESCE(client_approved_at, created_at) WHERE commercial_stage = 'quoting' AND status IN ('active','completed')`)
+- Test: `backend/src/__tests__/controllers/projectController.listAndQuote.test.ts` (ampliar), `backend/src/__tests__/database/migration49.test.ts` (crear, mismo molde que `scopingMigration.test.ts`)
+
+- [ ] **Step 1: Escribir tests que fallan**
+  - `createProjectFromQuote deja el proyecto con commercial_stage 'approved' y client_approved_at no nulo`.
+  - Migración 49: `pasa a approved los proyectos quoting con status active o completed, conserva client_approved_at existente y NO toca los quoting en on_hold, planning ni cancelled` (sembrar filas antes de aplicar la migración 49: ejecutar las migraciones hasta la 48, insertar, y aplicar la 49 con el mismo mecanismo que usan los otros tests de migración; si el runner no permite parar en una versión, ejecutar el `up` de la 49 sobre la BD sembrada).
+- [ ] **Step 2: Correr y ver el fallo** — `cd backend && npx jest src/__tests__/controllers/projectController.listAndQuote.test.ts src/__tests__/database/migration49.test.ts` — Expected: FAIL.
+- [ ] **Step 3: Implementar** el cambio del insert y la migración 49 (nunca editar migraciones anteriores).
+- [ ] **Step 4: Verificar** — `cd backend && npm test && npx tsc --noEmit && npm run lint` — Expected: PASS y sin errores.
+- [ ] **Step 5: Commit** — `fix(proyectos): crear desde cotización fija la etapa comercial aprobada y corrige filas existentes`
 
 ---
 
