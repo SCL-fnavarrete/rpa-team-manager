@@ -13,6 +13,8 @@ export interface PortfolioRow {
     sale_price: number; real_cost: number; projected_cost: number;
     real_profit: number; projected_profit: number;
     real_margin_percentage: number; projected_margin_percentage: number;
+    /** 'projected': el costo real es el planificado porque el proyecto aún no tiene horas aprobadas. */
+    real_hours_source: 'approved' | 'projected';
     health_semaphore: 'green' | 'yellow' | 'red' | 'gray';
     invoiced_clp: number; collected_clp: number; pending_to_invoice_clp: number;
     financials_error: boolean;
@@ -27,8 +29,19 @@ export interface PortfolioResult {
 
 const UNASSIGNED_REP_NAME = 'Sin asignar';
 
-/** Proyectos perdidos o cancelados: negocio no realizado, no suman a venta ni a costo de la cartera. */
-const isUnrealized = (row: PortfolioRow): boolean => row.commercial_stage === 'lost' || row.status === 'cancelled';
+/** Proyecto ya en marcha o terminado; una cotización real siempre está 'on_hold'. */
+const EXECUTION_STATUSES = ['active', 'completed'];
+
+/**
+ * Venta realizada: el cliente dio el OK (etapa 'approved') y el proyecto no se canceló; el resto (en cotización,
+ * perdido, cancelado) no suma a venta, costo ni por facturar. También cuenta un proyecto 'quoting' ya activo o
+ * completado: "Crear desde cotización" (POST /projects/from-quote) lo crea activo sin fijar la etapa y la BD le
+ * pone 'quoting' por defecto, mientras que una cotización real nace 'on_hold' (createProject y scoping) y
+ * updateProject impide activarla sin la aprobación del cliente. Los internos nacen 'approved' en createProject.
+ */
+const isRealizedSale = (row: PortfolioRow): boolean =>
+    row.status !== 'cancelled'
+    && (row.commercial_stage === 'approved' || (row.commercial_stage === 'quoting' && EXECUTION_STATUSES.includes(row.status)));
 
 const PROJECT_JOINS = `
     FROM projects p
@@ -118,6 +131,7 @@ export class PortfolioService {
             projected_profit: financials?.projected_profit ?? 0,
             real_margin_percentage: financials?.real_margin_percentage ?? 0,
             projected_margin_percentage: financials?.projected_margin_percentage ?? 0,
+            real_hours_source: financials?.real_hours_source ?? 'approved',
             health_semaphore: semaphore,
             invoiced_clp: invoicedCLP,
             collected_clp: collectedCLP,
@@ -127,12 +141,12 @@ export class PortfolioService {
     }
 
     /**
-     * Venta, costo y pendiente por facturar solo suman negocio realizado (sin perdidos ni cancelados);
+     * Venta, costo y pendiente por facturar solo suman venta realizada (ver isRealizedSale);
      * lo facturado y cobrado suma todas las filas porque es dinero real, y projects cuenta las filas devueltas.
      */
     private buildTotals(rows: PortfolioRow[]): PortfolioResult['totals'] {
         const sum = (list: PortfolioRow[], pick: (row: PortfolioRow) => number) => list.reduce((acc, row) => acc + pick(row), 0);
-        const realized = rows.filter(r => !isUnrealized(r));
+        const realized = rows.filter(isRealizedSale);
         return {
             projects: rows.length,
             sale_price: sum(realized, r => r.sale_price),
@@ -145,11 +159,11 @@ export class PortfolioService {
         };
     }
 
-    /** Venta por comercial sobre las filas ya filtradas; los proyectos perdidos o cancelados no cuentan como venta. */
+    /** Venta por comercial sobre las filas ya filtradas; solo cuenta la venta realizada, así que suma lo mismo que totals.sale_price. */
     private buildSalesByRep(rows: PortfolioRow[]): PortfolioResult['sales_by_rep'] {
         const byRep = new Map<number | null, PortfolioResult['sales_by_rep'][number]>();
         for (const row of rows) {
-            if (isUnrealized(row)) continue;
+            if (!isRealizedSale(row)) continue;
             const entry = byRep.get(row.sales_rep_id) ?? {
                 sales_rep_id: row.sales_rep_id,
                 sales_rep_name: row.sales_rep_name ?? UNASSIGNED_REP_NAME,
@@ -163,7 +177,10 @@ export class PortfolioService {
         return [...byRep.values()].sort((a, b) => b.sale_price - a.sale_price || a.sales_rep_name.localeCompare(b.sales_rep_name));
     }
 
-    /** Proyectos en cotización con el monto de su última versión; ignora el filtro de etapa pero respeta el resto. */
+    /**
+     * Cotizaciones en curso con el monto de su última versión; ignora el filtro de etapa pero respeta el resto.
+     * Excluye los 'quoting' ya activos o completados porque la cartera los cuenta como venta realizada.
+     */
     private async getPipeline(filters: PortfolioFilters): Promise<PortfolioResult['pipeline']> {
         const { clause, params } = this.buildWhere({ ...filters, commercial_stage: 'quoting' });
         const projects = await db.query(
@@ -172,9 +189,9 @@ export class PortfolioService {
              ${PROJECT_JOINS}
              LEFT JOIN project_quotes q ON q.project_id = p.id
                 AND q.version = (SELECT MAX(version) FROM project_quotes WHERE project_id = p.id)
-             ${clause}
+             ${clause} AND p.status NOT IN (${this.placeholders(EXECUTION_STATUSES)})
              ORDER BY p.name ASC, p.id ASC`,
-            params
+            [...params, ...EXECUTION_STATUSES]
         );
 
         const pipeline: PortfolioResult['pipeline'] = [];

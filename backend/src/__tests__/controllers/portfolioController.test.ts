@@ -95,10 +95,12 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
         return (await testDb.get(`SELECT id FROM business_areas WHERE code = ?`, [code])).id;
     }
 
+    // Una cotización real nace 'on_hold' (createProject y scoping); el resto de los proyectos, 'active'.
     async function addProject(p: SeedProject): Promise<number> {
+        const stage = p.stage ?? 'approved';
         const { id } = await testDb.run(
             `INSERT INTO projects (name, status, commercial_stage, client_id, sales_rep_id, area_id) VALUES (?, ?, ?, ?, ?, ?)`,
-            [p.name, p.status ?? 'active', p.stage ?? 'approved', p.clientId ?? null, p.repId ?? null, p.areaId ?? null]
+            [p.name, p.status ?? (stage === 'quoting' ? 'on_hold' : 'active'), stage, p.clientId ?? null, p.repId ?? null, p.areaId ?? null]
         );
         if (p.salePrice !== undefined || p.budgetedCost !== undefined || p.budgetedHours !== undefined) {
             await testDb.run(
@@ -178,6 +180,7 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
             sale_price: fin.sale_price, real_cost: fin.real_cost, projected_cost: fin.projected_cost,
             real_profit: fin.real_profit, projected_profit: fin.projected_profit,
             real_margin_percentage: fin.real_margin_percentage, projected_margin_percentage: fin.projected_margin_percentage,
+            real_hours_source: 'approved',
             health_semaphore: 'gray',
             invoiced_clp: 0, collected_clp: 0, pending_to_invoice_clp: 1000000,
             financials_error: false
@@ -187,7 +190,10 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
             real_profit: 800000, projected_profit: 200000,
             real_margin_percentage: 80, projected_margin_percentage: 20
         });
-        expect(result.rows[1]).toMatchObject({ project_id: beta, sale_price: 500000, real_cost: 300000, projected_cost: 300000 });
+        // Beta no tiene horas aprobadas: su costo real es la proyección (el planificado), no un costo medido
+        expect(result.rows[1]).toMatchObject({
+            project_id: beta, sale_price: 500000, real_cost: 300000, projected_cost: 300000, real_hours_source: 'projected'
+        });
         expect(result.totals).toEqual({
             projects: 2, sale_price: 1500000, real_cost: 500000, projected_cost: 1100000, projected_profit: 400000,
             invoiced_clp: 0, collected_clp: 0, pending_to_invoice_clp: 1500000
@@ -241,31 +247,89 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
         });
     });
 
-    it('los totales excluyen de venta, costo y por facturar los proyectos perdidos y cancelados, pero suman todo lo facturado y cobrado, y cuadran con sales_by_rep', async () => {
+    it('los totales excluyen de venta, costo y por facturar los proyectos en cotización, perdidos y cancelados, pero suman todo lo facturado y cobrado, y cuadran con sales_by_rep', async () => {
         const rep = await addRep('Ana');
         const vigente = await addProject({ name: 'Vigente', repId: rep, salePrice: 1000000, budgetedCost: 600000, budgetedHours: 10 });
+        const cotizando = await addProject({ name: 'Cotizando', repId: rep, stage: 'quoting', salePrice: 4000000, budgetedCost: 300000, budgetedHours: 10 });
         const perdido = await addProject({ name: 'Perdido', repId: rep, stage: 'lost', salePrice: 5000000, budgetedCost: 100000, budgetedHours: 10 });
         const cancelado = await addProject({ name: 'Cancelado', repId: rep, status: 'cancelled', salePrice: 3000000, budgetedCost: 200000, budgetedHours: 10 });
         const facturaVigente = await addInvoice(vigente, 300000, 'CLP');
         await addPayment(facturaVigente, 100000, 'CLP');
         const facturaCancelado = await addInvoice(cancelado, 50000, 'CLP');
         await addPayment(facturaCancelado, 20000, 'CLP');
+        const facturaCotizando = await addInvoice(cotizando, 10000, 'CLP');
+        await addPayment(facturaCotizando, 4000, 'CLP');
 
         const result = await portfolioService.getPortfolio();
 
         // las filas siguen mostrando cada proyecto con sus propias cifras
-        expect(result.rows).toHaveLength(3);
+        expect(result.rows).toHaveLength(4);
         const rowOf = (id: number) => result.rows.find(r => r.project_id === id)!;
+        expect(rowOf(cotizando)).toMatchObject({ sale_price: 4000000, invoiced_clp: 10000, pending_to_invoice_clp: 3990000 });
         expect(rowOf(perdido)).toMatchObject({ sale_price: 5000000, pending_to_invoice_clp: 5000000 });
         expect(rowOf(cancelado)).toMatchObject({ sale_price: 3000000, invoiced_clp: 50000, collected_clp: 20000 });
         expect(result.totals).toEqual({
-            projects: 3,
+            projects: 4,
             sale_price: 1000000, real_cost: 600000, projected_cost: 600000, projected_profit: 400000,
-            invoiced_clp: 350000, collected_clp: 120000,
+            invoiced_clp: 360000, collected_clp: 124000,
             pending_to_invoice_clp: 700000
         });
         const ventaPorComercial = result.sales_by_rep.reduce((acc, r) => acc + r.sale_price, 0);
         expect(ventaPorComercial).toBe(result.totals.sale_price);
+    });
+
+    it('un proyecto en cotización con precio no suma a venta, por facturar ni ventas por comercial, pero aparece en el pipeline', async () => {
+        const rep = await addRep('Ana');
+        const aprobado = await addProject({ name: 'Aprobado', repId: rep, salePrice: 1000000, budgetedCost: 400000, budgetedHours: 10 });
+        const cotizando = await addProject({ name: 'Cotizando', repId: rep, stage: 'quoting', salePrice: 9000000, budgetedCost: 800000, budgetedHours: 10 });
+        await addQuote(cotizando, 1, 9000000, 'CLP', 'sent');
+
+        const result = await portfolioService.getPortfolio();
+
+        expect(result.rows.map(r => r.project_id)).toEqual([aprobado, cotizando]);
+        expect(result.totals).toMatchObject({
+            projects: 2, sale_price: 1000000, real_cost: 400000, projected_cost: 400000, pending_to_invoice_clp: 1000000
+        });
+        expect(result.sales_by_rep).toEqual([{ sales_rep_id: rep, sales_rep_name: 'Ana', projects: 1, sale_price: 1000000 }]);
+        expect(result.totals.sale_price).toBe(result.sales_by_rep.reduce((acc, r) => acc + r.sale_price, 0));
+        expect(result.pipeline.map(p => [p.project_id, p.last_quote_amount_clp])).toEqual([[cotizando, 9000000]]);
+    });
+
+    it('un proyecto en cotización que ya está activo o completado (creado con "Crear desde cotización", que no fija la etapa) cuenta como venta realizada y no figura en el pipeline', async () => {
+        const rep = await addRep('Ana');
+        const desdeCotizacion = await addProject({ name: 'Desde cotización', repId: rep, stage: 'quoting', status: 'active', salePrice: 2000000 });
+        const terminado = await addProject({ name: 'Terminado', repId: rep, stage: 'quoting', status: 'completed', salePrice: 500000 });
+        const cotizacionReal = await addProject({ name: 'Cotización real', repId: rep, stage: 'quoting', salePrice: 7000000 });
+        await addProject({ name: 'Cotización cancelada', repId: rep, stage: 'quoting', status: 'cancelled', salePrice: 6000000 });
+
+        const result = await portfolioService.getPortfolio();
+
+        expect(result.totals).toMatchObject({ projects: 4, sale_price: 2500000, pending_to_invoice_clp: 2500000 });
+        expect(result.sales_by_rep).toEqual([{ sales_rep_id: rep, sales_rep_name: 'Ana', projects: 2, sale_price: 2500000 }]);
+        // el pipeline son las cotizaciones aún no ejecutadas: no incluye los proyectos ya activos o completados
+        const pipelineIds = result.pipeline.map(p => p.project_id);
+        expect(pipelineIds).toContain(cotizacionReal);
+        expect(pipelineIds).not.toContain(desdeCotizacion);
+        expect(pipelineIds).not.toContain(terminado);
+    });
+
+    it('cada fila indica si su costo real viene de horas aprobadas o es una proyección sin horas aprobadas', async () => {
+        const conHoras = await addProject({ name: 'Con horas', salePrice: 1000000, budgetedCost: 600000, budgetedHours: 100 });
+        const sinHoras = await addProject({ name: 'Sin horas', salePrice: 1000000, budgetedCost: 600000, budgetedHours: 100 });
+        await testDb.run(
+            `INSERT INTO time_entries (user_id, project_id, hours, date, approval_status, cost_rate_snapshot) VALUES (?, ?, 8, '2026-10-05', 'approved', 8000)`,
+            [users.dev, conHoras]
+        );
+        await testDb.run(
+            `INSERT INTO time_entries (user_id, project_id, hours, date, approval_status, cost_rate_snapshot) VALUES (?, ?, 8, '2026-10-05', 'submitted', 8000)`,
+            [users.dev, sinHoras]
+        );
+
+        const result = await portfolioService.getPortfolio();
+
+        const sourceOf = (id: number) => result.rows.find(r => r.project_id === id)!.real_hours_source;
+        expect(sourceOf(conHoras)).toBe('approved');
+        expect(sourceOf(sinHoras)).toBe('projected');
     });
 
     it("pipeline lista solo proyectos en commercial_stage 'quoting' con el monto de su última cotización", async () => {
@@ -333,17 +397,23 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
 
         const porComercial = await portfolioService.getPortfolio({ sales_rep_id: repA });
         expect(ids(porComercial.rows)).toEqual([p1, p3]);
-        expect(porComercial.totals).toMatchObject({ projects: 2, sale_price: 5000 });
-        expect(porComercial.sales_by_rep).toEqual([{ sales_rep_id: repA, sales_rep_name: 'Ana', projects: 2, sale_price: 5000 }]);
+        // P3 está en cotización: es una fila pero no suma a la venta ni a las ventas por comercial
+        expect(porComercial.totals).toMatchObject({ projects: 2, sale_price: 1000 });
+        expect(porComercial.sales_by_rep).toEqual([{ sales_rep_id: repA, sales_rep_name: 'Ana', projects: 1, sale_price: 1000 }]);
 
         const porArea = await portfolioService.getPortfolio({ area_id: sap });
         expect(ids(porArea.rows)).toEqual([p2, p3]);
-        expect(porArea.totals).toMatchObject({ projects: 2, sale_price: 6000 });
+        expect(porArea.totals).toMatchObject({ projects: 2, sale_price: 2000 });
 
         const porEtapa = await portfolioService.getPortfolio({ commercial_stage: 'approved' });
         expect(ids(porEtapa.rows)).toEqual([p1, p2]);
         // el pipeline ignora el filtro de etapa: sigue mostrando lo que está cotizándose
         expect(ids(porEtapa.pipeline)).toEqual([p3]);
+
+        const porCotizacion = await portfolioService.getPortfolio({ commercial_stage: 'quoting' });
+        expect(ids(porCotizacion.rows)).toEqual([p3]);
+        expect(porCotizacion.totals).toMatchObject({ projects: 1, sale_price: 0, pending_to_invoice_clp: 0 });
+        expect(porCotizacion.sales_by_rep).toEqual([]);
 
         const combinado = await portfolioService.getPortfolio({ client_id: clientY, commercial_stage: 'lost' });
         expect(ids(combinado.rows)).toEqual([p4]);
