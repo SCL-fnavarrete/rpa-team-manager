@@ -69,7 +69,25 @@ export class PortfolioService {
             params
         );
 
-        const projectIds = projects.map((p: any) => Number(p.id));
+        const { invoiced, collected } = await this.getBillingByProject(projects.map((p: any) => Number(p.id)));
+
+        const rows = await Promise.all(projects.map((p: any) =>
+            this.buildRow(p, invoiced.get(Number(p.id)) ?? 0, collected.get(Number(p.id)) ?? 0)
+        ));
+
+        return {
+            rows,
+            totals: this.buildTotals(rows),
+            pipeline: await this.getPipeline(filters),
+            sales_by_rep: this.buildSalesByRep(rows)
+        };
+    }
+
+    /**
+     * Facturado (facturas que no son borrador ni anuladas) y cobrado (pagos de facturas no anuladas) por proyecto,
+     * en CLP. Lo comparten la cartera y el Centro PMO ejecutivo para que sus cifras de cobranza cuadren.
+     */
+    async getBillingByProject(projectIds: number[]): Promise<{ invoiced: Map<number, number>; collected: Map<number, number> }> {
         const invoiced = await this.sumByProjectToCLP(
             `SELECT i.project_id, i.currency, SUM(i.amount) AS amount
              FROM invoices i
@@ -85,17 +103,7 @@ export class PortfolioService {
              GROUP BY i.project_id, pay.currency`,
             projectIds
         );
-
-        const rows = await Promise.all(projects.map((p: any) =>
-            this.buildRow(p, invoiced.get(Number(p.id)) ?? 0, collected.get(Number(p.id)) ?? 0)
-        ));
-
-        return {
-            rows,
-            totals: this.buildTotals(rows),
-            pipeline: await this.getPipeline(filters),
-            sales_by_rep: this.buildSalesByRep(rows)
-        };
+        return { invoiced, collected };
     }
 
     private async buildRow(project: any, invoicedCLP: number, collectedCLP: number): Promise<PortfolioRow> {

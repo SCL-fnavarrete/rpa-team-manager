@@ -79,7 +79,7 @@ describe('GET /api/pmo/executive-suite - costos y márgenes por rol y cifras ali
         for (const table of [
             'payments', 'invoices', 'payment_milestones', 'project_cost_center_allocations', 'project_pmo_metrics',
             'project_quotes', 'time_entries', 'project_assignments', 'project_milestones', 'project_baselines',
-            'project_financials', 'projects', 'clients'
+            'project_financials', 'projects', 'clients', 'exchange_rates'
         ]) {
             await testDb.run(`DELETE FROM ${table}`);
         }
@@ -119,12 +119,21 @@ describe('GET /api/pmo/executive-suite - costos y márgenes por rol y cifras ali
         );
     }
 
-    async function addInvoice(projectId: number, amount: number, dueDate: string, status = 'issued'): Promise<void> {
+    async function addInvoice(
+        projectId: number, amount: number, dueDate: string, status = 'issued', currency: 'CLP' | 'USD' = 'CLP'
+    ): Promise<number> {
         invoiceSeq += 1;
-        await testDb.run(
+        return (await testDb.run(
             `INSERT INTO invoices (project_id, invoice_number, issue_date, due_date, currency, amount, status)
-             VALUES (?, ?, '2026-10-01', ?, 'CLP', ?, ?)`,
-            [projectId, `F-${invoiceSeq}`, dueDate, amount, status]
+             VALUES (?, ?, '2026-10-01', ?, ?, ?, ?)`,
+            [projectId, `F-${invoiceSeq}`, dueDate, currency, amount, status]
+        )).id!;
+    }
+
+    async function addPayment(invoiceId: number, amount: number): Promise<void> {
+        await testDb.run(
+            `INSERT INTO payments (invoice_id, amount, currency, payment_date) VALUES (?, ?, 'CLP', '2026-10-10')`,
+            [invoiceId, amount]
         );
     }
 
@@ -288,6 +297,92 @@ describe('GET /api/pmo/executive-suite - costos y márgenes por rol y cifras ali
         expect(res.body.general_manager.consolidated_pnl.total_sold_clp).toBe(0);
         expect(res.body.controller.triple_conciliation).toHaveLength(1);
         expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('finanzas del proyecto'), expect.any(Error));
+    });
+
+    it('invoiced_clp y paid_clp coinciden con los de la cartera: sin duplicar facturas con varios pagos, sin borradores y convirtiendo USD', async () => {
+        await testDb.run(`INSERT INTO exchange_rates (currency, rate_date, rate_to_clp) VALUES ('USD', '2020-01-01', 950)`);
+        const projectId = await addProject({ name: 'Con facturas', salePrice: 1000000, budgetedCost: 400000, budgetedHours: 10 });
+        const dosPagos = await addInvoice(projectId, 300000, '2030-01-01');
+        await addPayment(dosPagos, 100000);
+        await addPayment(dosPagos, 50000);
+        await addInvoice(projectId, 999999, '2030-01-01', 'draft');
+        await addInvoice(projectId, 100, '2030-01-01', 'issued', 'USD'); // 100 USD x 950 = 95.000
+        await addInvoice(projectId, 888888, '2030-01-01', 'cancelled');
+
+        const res = await getSuite('team_lead');
+        const portfolio = await portfolioService.getPortfolio();
+
+        const row = portfolio.rows.find(r => r.project_id === projectId)!;
+        expect(row).toMatchObject({ invoiced_clp: 395000, collected_clp: 150000 });
+        const conciliation = res.body.controller.triple_conciliation.find((r: any) => r.project_id === projectId);
+        expect(conciliation).toMatchObject({ invoiced_clp: row.invoiced_clp, paid_clp: row.collected_clp, billed_pct: 40 });
+        // lo mismo le llega a billing
+        const billing = (await getSuite('billing')).body.controller.triple_conciliation.find((r: any) => r.project_id === projectId);
+        expect(billing).toMatchObject({ invoiced_clp: 395000, paid_clp: 150000 });
+    });
+
+    describe('señales que no dependen del costo para quien no es team_lead', () => {
+        // Dos proyectos críticos con el mismo atraso y riesgo, pero Beta (creado primero) con más sobrecosto que Alfa.
+        async function seedTwoRiskProjects(): Promise<void> {
+            const beta = await addProject({ name: 'Beta', salePrice: 1000000, budgetedCost: 100000, budgetedHours: 10 });
+            const alfa = await addProject({ name: 'Alfa', salePrice: 1000000, budgetedCost: 150000, budgetedHours: 10 });
+            for (const id of [beta, alfa]) {
+                await addApprovedHours(id, 25); // costo real 200.000 en ambos
+                await testDb.run(`INSERT INTO project_pmo_metrics (project_id, schedule_variance_days, risk_level) VALUES (?, 6, 'low')`, [id]);
+            }
+        }
+
+        it('top_risk_projects de rpa_operations se ordena sin mirar el sobrecosto (empate por nombre) y el de team_lead sigue ordenado por sobrecosto', async () => {
+            await seedTwoRiskProjects();
+
+            const ops = (await getSuite('rpa_operations')).body.general_manager.top_risk_projects.map((p: any) => p.name);
+            const billing = (await getSuite('billing')).body.general_manager.top_risk_projects.map((p: any) => p.name);
+            const lead = (await getSuite('team_lead')).body.general_manager.top_risk_projects;
+
+            expect(ops).toEqual(['Alfa', 'Beta']);
+            expect(billing).toEqual(['Alfa', 'Beta']);
+            expect(lead.map((p: any) => p.name)).toEqual(['Beta', 'Alfa']);
+            expect(lead.map((p: any) => p.cost_variance_clp)).toEqual([100000, 50000]);
+        });
+
+        it('top_risk_projects de rpa_operations pone primero lo crítico, luego más atraso y luego más riesgo', async () => {
+            const atrasado = await addProject({ name: 'Zeta atrasado', salePrice: 1000000, budgetedCost: 100000, budgetedHours: 10 });
+            const riesgoso = await addProject({ name: 'Yota riesgoso', salePrice: 1000000, budgetedCost: 100000, budgetedHours: 10 });
+            const alerta = await addProject({ name: 'Alfa en alerta', salePrice: 1000000, budgetedCost: 100000, budgetedHours: 10 });
+            const riesgoAlto = await addProject({ name: 'Mu riesgo alto', salePrice: 1000000, budgetedCost: 100000, budgetedHours: 10 });
+            await testDb.run(`INSERT INTO project_pmo_metrics (project_id, schedule_variance_days, risk_level) VALUES (?, 9, 'low')`, [atrasado]);
+            await testDb.run(`INSERT INTO project_pmo_metrics (project_id, schedule_variance_days, risk_level) VALUES (?, 7, 'critical')`, [riesgoso]);
+            await testDb.run(`INSERT INTO project_pmo_metrics (project_id, schedule_variance_days, risk_level) VALUES (?, 7, 'high')`, [riesgoAlto]);
+            await testDb.run(`INSERT INTO project_pmo_metrics (project_id, schedule_variance_days, risk_level) VALUES (?, 3, 'high')`, [alerta]);
+
+            const ops = (await getSuite('rpa_operations')).body.general_manager.top_risk_projects.map((p: any) => p.name);
+
+            // crítico (atraso > 5): 9 días, luego 7 días con riesgo crítico antes que 7 días con riesgo alto; al final el que solo está en alerta
+            expect(ops).toEqual(['Zeta atrasado', 'Yota riesgoso', 'Mu riesgo alto', 'Alfa en alerta']);
+        });
+
+        it('la severity del scope creep de rpa_operations se basa solo en horas y la de team_lead también mira la fuga de margen', async () => {
+            // 15 h sobre lo cotizado (menos de 20) y fuga de margen de 19 puntos (cotizado 99%, real 80%)
+            const projectId = await addProject({ name: 'Alfa', salePrice: 1000000, budgetedCost: 100000, budgetedHours: 10 });
+            await addApprovedHours(projectId, 25);
+            await addApprovedQuote(projectId, 10, 99, 1000000);
+
+            const lead = (await getSuite('team_lead')).body.commercial.scope_creep_alerts;
+            const ops = (await getSuite('rpa_operations')).body.commercial.scope_creep_alerts;
+
+            expect(lead).toEqual([expect.objectContaining({ overrun_hours: 15, severity: 'critical' })]);
+            expect(ops).toEqual([expect.objectContaining({ overrun_hours: 15, severity: 'warning' })]);
+        });
+
+        it('la severity de rpa_operations es crítica cuando las horas excedidas superan 20', async () => {
+            const projectId = await addProject({ name: 'Alfa', salePrice: 1000000, budgetedCost: 100000, budgetedHours: 10 });
+            await addApprovedHours(projectId, 35);
+            await addApprovedQuote(projectId, 10, 50, 1000000);
+
+            const ops = (await getSuite('rpa_operations')).body.commercial.scope_creep_alerts;
+
+            expect(ops).toEqual([expect.objectContaining({ overrun_hours: 25, severity: 'critical' })]);
+        });
     });
 });
 

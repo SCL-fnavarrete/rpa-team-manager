@@ -5,7 +5,7 @@ import { activityLogService } from '../services/activityLogService';
 import { financeService, Currency, ProjectFinancials } from '../services/financeService';
 import { billingService } from '../services/billingService';
 import { timesheetService } from '../services/timesheetService';
-import { isRealizedSale } from '../services/portfolioService';
+import { isRealizedSale, portfolioService } from '../services/portfolioService';
 
 interface AuthenticatedRequest extends Request {
     user?: {
@@ -60,6 +60,64 @@ export const stripFinancials = (data: ExecutiveSuiteResponse, role: string | und
         }
     };
 };
+
+/**
+ * Columnas de project_pmo_metrics que un cliente puede escribir con POST /pmo/projects/:id/metrics. El resto
+ * (id, project_id, last_updated, updated_by) las fija el servidor. Es una lista cerrada: nunca se interpola en SQL
+ * una clave del cuerpo de la petición.
+ */
+export const PMO_METRICS_COLUMNS = [
+    'planned_hours', 'planned_start_date', 'planned_end_date', 'planned_budget',
+    'actual_hours', 'actual_start_date', 'actual_end_date', 'actual_cost',
+    'completion_percentage', 'completed_tasks', 'total_tasks',
+    'schedule_variance_days', 'cost_variance_percentage', 'scope_variance_percentage',
+    'risk_level', 'risk_factors', 'bugs_found', 'bugs_resolved', 'client_satisfaction_score', 'team_velocity'
+] as const;
+
+const PMO_METRICS_SELECT = `SELECT id, project_id, ${PMO_METRICS_COLUMNS.join(', ')}, last_updated, updated_by
+                FROM project_pmo_metrics WHERE project_id = ?`;
+
+/**
+ * Claves de presupuesto y costo que salen de /pmo/dashboard, /pmo/analytics, /pmo/projects/:id/gantt y
+ * /pmo/projects/:id/metrics. Solo nombres exactos: budgeted_hours (horas, no dinero) y financial_impact (impacto
+ * del atraso de un hito) no son presupuesto del proyecto y se siguen mostrando.
+ */
+const BUDGET_COST_KEYS = new Set([
+    'budget', 'planned_budget', 'actual_cost', 'cost_variance_percentage', 'budget_utilization_percentage', 'budget_performance',
+    'total_planned_budget', 'total_actual_cost', 'overall_budget_variance', 'over_budget_projects',
+    'budget_planned', 'budget_spent', 'budgetAnalysis', 'on_budget_projects', 'total_budget_managed', 'avg_budget_variance',
+    'on_budget_deliveries', 'on_budget_rate'
+]);
+
+// toString y no getPrototypeOf: las filas del driver sqlite3 vienen de otro contexto de ejecución (Jest) y su prototipo no es el nuestro
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+    Object.prototype.toString.call(value) === '[object Object]';
+
+const withoutBudgetKeys = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(withoutBudgetKeys);
+    if (!isPlainObject(value)) return value;
+    return Object.fromEntries(
+        Object.entries(value).filter(([key]) => !BUDGET_COST_KEYS.has(key)).map(([key, child]) => [key, withoutBudgetKeys(child)])
+    );
+};
+
+/**
+ * Quita el presupuesto y los costos (planned_budget, actual_cost, desvíos de costo y sus agregados) de la respuesta
+ * de las rutas de PMO cuando el rol no es team_lead; un rol ausente o desconocido se trata como sin permiso.
+ * Recorre arreglos y objetos anidados sin modificar el original; team_lead recibe todo igual.
+ */
+export const stripBudgetFields = <T>(data: T, role: string | undefined): T =>
+    canSeeFinancials(role) ? data : withoutBudgetKeys(data) as T;
+
+const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+const HEALTH_RANK: Record<string, number> = { critical: 0, warning: 1, healthy: 2 };
+
+/** Orden de los proyectos en riesgo para quien no ve costos: salud, más atraso, más riesgo y nombre (desempate fijo). */
+const compareRiskWithoutCost = (a: SuiteRow, b: SuiteRow): number =>
+    (HEALTH_RANK[String(a.project_health_status)] ?? 3) - (HEALTH_RANK[String(b.project_health_status)] ?? 3)
+    || Number(b.schedule_variance_days) - Number(a.schedule_variance_days)
+    || (SEVERITY_RANK[String(a.risk_level)] ?? 4) - (SEVERITY_RANK[String(b.risk_level)] ?? 4)
+    || String(a.name).localeCompare(String(b.name));
 
 /** Diagnóstico de un proyecto en alerta; el monto del sobrecosto solo se escribe para quien puede ver costos. */
 const describeCriticalReason = (costVarianceCLP: number, schedVar: number, riskLevel: string, showAmounts: boolean): string => {
@@ -186,13 +244,13 @@ export class PMOController {
                 ORDER BY planned_fte DESC, u.full_name
             `);
 
-            res.json({
+            res.json(stripBudgetFields({
                 projects,
                 overallMetrics,
                 upcomingMilestones,
                 teamWorkload,
                 teamCapacity
-            });
+            }, req.user?.role));
         } catch (error) {
             logger.error('Get PMO dashboard error:', error);
             res.status(500).json({ error: 'Failed to get PMO dashboard data' });
@@ -373,7 +431,7 @@ export class PMOController {
             };
 
             logger.info(`Gantt data successfully loaded for project ${id}`);
-            res.json(result);
+            res.json(stripBudgetFields(result, req.user?.role));
         } catch (error) {
             logger.error('Get project Gantt error:', error);
             res.status(500).json({ error: 'Failed to get project Gantt data' });
@@ -813,59 +871,50 @@ export class PMOController {
     updateProjectMetrics = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
         try {
             const { id } = req.params;
-            const metrics = req.body;
+            const body: unknown = req.body;
+
+            if (!isPlainObject(body)) {
+                res.status(400).json({ error: 'El cuerpo debe ser un objeto con las métricas a guardar' });
+                return;
+            }
+
+            const allowed = new Set<string>(PMO_METRICS_COLUMNS);
+            const notAllowed = Object.keys(body).filter(key => !allowed.has(key));
+            if (notAllowed.length > 0) {
+                res.status(400).json({ error: `Campos de métricas no permitidos: ${notAllowed.join(', ')}` });
+                return;
+            }
+
+            // Los nombres de columna salen siempre de la lista blanca, nunca de las claves que envía el cliente
+            const columns = PMO_METRICS_COLUMNS.filter(column => Object.prototype.hasOwnProperty.call(body, column));
+            const values = columns.map(column => body[column]);
 
             // Check if metrics exist for this project
             const existing = await db.get('SELECT id FROM project_pmo_metrics WHERE project_id = ?', [id]);
 
             if (existing) {
                 // Update existing metrics
-                const fields = [];
-                const values = [];
-
-                for (const [key, value] of Object.entries(metrics)) {
-                    if (key !== 'project_id') {
-                        fields.push(`${key} = ?`);
-                        values.push(value);
-                    }
-                }
-
+                const fields = columns.map(column => `${column} = ?`);
                 fields.push('last_updated = datetime(\'now\')');
                 fields.push('updated_by = ?');
-                values.push(req.user?.id);
-                values.push(id);
 
                 await db.run(`
                     UPDATE project_pmo_metrics 
                     SET ${fields.join(', ')} 
                     WHERE project_id = ?
-                `, values);
+                `, [...values, req.user?.id, id]);
             } else {
                 // Create new metrics
-                const columns = ['project_id', 'updated_by', 'last_updated'];
-                const placeholders = ['?', '?', 'datetime(\'now\')'];
-                const insertValues = [id, req.user?.id];
-
-                for (const [key, value] of Object.entries(metrics)) {
-                    if (key !== 'project_id') {
-                        columns.push(key);
-                        placeholders.push('?');
-                        insertValues.push(value as string | number);
-                    }
-                }
-
                 await db.run(`
-                    INSERT INTO project_pmo_metrics (${columns.join(', ')})
-                    VALUES (${placeholders.join(', ')})
-                `, insertValues);
+                    INSERT INTO project_pmo_metrics (project_id, updated_by, last_updated${columns.map(column => `, ${column}`).join('')})
+                    VALUES (?, ?, datetime('now')${columns.map(() => ', ?').join('')})
+                `, [id, req.user?.id, ...values]);
             }
 
-            const updatedMetrics = await db.get(`
-                SELECT * FROM project_pmo_metrics WHERE project_id = ?
-            `, [id]);
+            const updatedMetrics = await db.get(PMO_METRICS_SELECT, [id]);
 
             logger.info(`PMO metrics updated for project: ${id}`);
-            res.json(updatedMetrics);
+            res.json(stripBudgetFields(updatedMetrics, req.user?.role));
         } catch (error) {
             logger.error('Update project metrics error:', error);
             res.status(500).json({ error: 'Failed to update project metrics' });
@@ -1117,7 +1166,7 @@ export class PMOController {
                     END
             `);
 
-            res.json({
+            res.json(stripBudgetFields({
                 executiveSummary,
                 trendAnalysis,
                 budgetAnalysis,
@@ -1128,7 +1177,7 @@ export class PMOController {
                 resourceUtilization,
                 satisfactionTrends,
                 riskDistribution
-            });
+            }, req.user?.role));
         } catch (error) {
             logger.error('Get PMO analytics error:', error);
             res.status(500).json({ error: 'Failed to get PMO analytics' });
@@ -1310,7 +1359,10 @@ export class PMOController {
 
             logger.info(`PMO metrics retrieved for project: ${projectMetrics.name} (ID: ${projectId})`);
 
-            res.json({
+            // El riesgo de sobrecosto dice cuánto se pasó el presupuesto: solo lo ve team_lead
+            const visibleRisks = canSeeFinancials(req.user?.role) ? risks : risks.filter((r: any) => r.risk_type !== 'budget_overrun');
+
+            res.json(stripBudgetFields({
                 project: projectMetrics,
                 milestones: {
                     total: milestones.length,
@@ -1320,11 +1372,11 @@ export class PMOController {
                     ).length,
                     list: milestones
                 },
-                risks: risks,
+                risks: visibleRisks,
                 team: teamMetrics,
                 kpis: kpis,
-                alerts: risks.filter((r: any) => r.severity === 'critical' || r.severity === 'high')
-            });
+                alerts: visibleRisks.filter((r: any) => r.severity === 'critical' || r.severity === 'high')
+            }, req.user?.role));
 
         } catch (error) {
             logger.error(`Get project PMO metrics error for project ${req.params.id}:`, error);
@@ -1337,6 +1389,8 @@ export class PMOController {
         try {
             await billingService.evaluateTriggers();
             await billingService.evaluateOverdue();
+
+            const canSeeCosts = canSeeFinancials(req.user?.role);
 
             // 1. Proyectos y avance PMO manual (project_pmo_metrics solo aporta avance, atraso, riesgo y satisfacción;
             // los montos salen siempre de financeService). Solo cuentan los de venta realizada, como en la cartera.
@@ -1417,7 +1471,7 @@ export class PMOController {
                     sale_price_clp: salePrice,
                     progress_pct: Number(p.completion_percentage || 0),
                     days_to_deadline: daysToDeadline,
-                    critical_reason: describeCriticalReason(costVarianceCLP, schedVar, riskLevel, canSeeFinancials(req.user?.role)),
+                    critical_reason: describeCriticalReason(costVarianceCLP, schedVar, riskLevel, canSeeCosts),
                     risk_level: riskLevel,
                     satisfaction_score: p.client_satisfaction_score
                 };
@@ -1428,9 +1482,12 @@ export class PMOController {
                 ? Math.round(((total_gross_profit_clp / total_sold_clp) * 100) * 10) / 10
                 : 0;
 
+            // Quien no ve costos recibe el orden sin sobrecosto: por salud, atraso y riesgo (el costo se podría despejar del orden)
             const top_risk_projects = analyzedProjects
                 .filter(p => p.project_health_status !== 'healthy')
-                .sort((a, b) => (b.cost_variance_clp + b.schedule_variance_days * 100000) - (a.cost_variance_clp + a.schedule_variance_days * 100000))
+                .sort(canSeeCosts
+                    ? (a, b) => (b.cost_variance_clp + b.schedule_variance_days * 100000) - (a.cost_variance_clp + a.schedule_variance_days * 100000)
+                    : compareRiskWithoutCost)
                 .slice(0, 5);
 
             // Capacidad y utilización
@@ -1528,7 +1585,7 @@ export class PMOController {
                     real_hours: m.real_hours,
                     overrun_hours: m.hours_exceeded,
                     overrun_cost_clp: Math.round(m.hours_exceeded * 35000), // Promedio estimado HH
-                    severity: (m.hours_exceeded > 20 || m.margin_leakage_pct > 15) ? 'critical' : 'warning'
+                    severity: (m.hours_exceeded > 20 || (canSeeCosts && m.margin_leakage_pct > 15)) ? 'critical' : 'warning'
                 }));
 
             // Scorecard por Cliente
@@ -1566,25 +1623,11 @@ export class PMOController {
             // -----------------------------------------------------------------
             // PERSPECTIVA 3: CONTROLLER / CONTROL DE GESTIÓN (Triple Conciliación & Imputaciones)
             // -----------------------------------------------------------------
-            const invoiceAggregates = await db.query(`
-                SELECT i.project_id,
-                       COALESCE(SUM(i.amount), 0) as total_invoiced,
-                       COALESCE(SUM(pay.amount), 0) as total_paid
-                FROM invoices i
-                LEFT JOIN payments pay ON pay.invoice_id = i.id
-                WHERE i.status != 'cancelled'
-                GROUP BY i.project_id
-            `);
-            const invoiceMap = new Map<number, { total_invoiced: number; total_paid: number }>();
-            invoiceAggregates.forEach((r: any) => {
-                invoiceMap.set(Number(r.project_id), {
-                    total_invoiced: Number(r.total_invoiced || 0),
-                    total_paid: Number(r.total_paid || 0)
-                });
-            });
+            // Mismo facturado y cobrado que la cartera: sin duplicar facturas con varios pagos, sin borradores, en CLP
+            const billing = await portfolioService.getBillingByProject(projects.map((p: any) => Number(p.id)));
 
             const triple_conciliation = analyzedProjects.map(p => {
-                const inv = invoiceMap.get(p.id) || { total_invoiced: 0, total_paid: 0 };
+                const inv = { total_invoiced: billing.invoiced.get(p.id) ?? 0, total_paid: billing.collected.get(p.id) ?? 0 };
                 const physical_pct = p.progress_pct;
                 const cost_consumed_pct = p.budgeted_cost_clp > 0
                     ? Math.round((p.real_cost_clp / p.budgeted_cost_clp) * 100)

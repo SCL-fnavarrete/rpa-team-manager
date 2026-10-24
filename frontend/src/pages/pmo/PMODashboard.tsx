@@ -78,16 +78,17 @@ interface PMOAnalytics {
     active_projects: number;
     completed_projects: number;
     critical_projects: number;
-    over_budget_projects: number;
+    over_budget_projects?: number;
     delayed_projects: number;
     avg_completion: number;
     avg_satisfaction: number;
-    total_planned_budget: number;
-    total_actual_cost: number;
-    overall_budget_variance: number;
+    // Presupuesto y costos solo los envía el backend a team_lead
+    total_planned_budget?: number;
+    total_actual_cost?: number;
+    overall_budget_variance?: number;
   };
   trendAnalysis: any[];
-  budgetAnalysis: any[];
+  budgetAnalysis?: any[];
   scheduleAnalysis: any[];
   riskAnalysis: any[];
   teamAnalysis: any[];
@@ -1102,6 +1103,8 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
   });
   const needsAttention = visibleProjects.filter((project: any) => project.project_health_status === 'critical' || project.project_health_status === 'warning' || (project.days_to_deadline !== null && project.days_to_deadline !== undefined && project.days_to_deadline < 7));
   const openProject = (id: number) => navigate(`/projects/${id}`);
+  // Presupuesto y costos del análisis solo llegan para team_lead; sin ellos se omiten esas tarjetas y columnas
+  const showBudgetAnalytics = Array.isArray(analytics?.budgetAnalysis);
 
   if (loading) {
     return <LoadingState tip="Cargando centro PMO…" minHeight={400} />;
@@ -1466,22 +1469,21 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                         </div>
                       ),
                     },
-                    {
+                    ...(user?.role === 'team_lead' ? [{
                       title: 'Presupuesto',
                       key: 'budget',
                       width: 100,
-                      responsive: user?.role === 'team_lead' ? undefined : ['xxl'],
                       render: (record: any) => (
-                        user?.role === 'team_lead' ? <div style={{ fontSize: '11px' }}>
+                        <div style={{ fontSize: '11px' }}>
                           <div>{record.planned_budget ? `$${(record.planned_budget / 1000000).toFixed(1)}M` : 'N/A'}</div>
                           <div style={{ 
                             color: record.cost_variance_percentage > 10 ? 'var(--color-error)' : record.cost_variance_percentage > 0 ? 'var(--color-warning)' : 'var(--color-success)'
                           }}>
                             {record.cost_variance_percentage ? `${record.cost_variance_percentage > 0 ? '+' : ''}${record.cost_variance_percentage.toFixed(1)}%` : 'N/A'}
                           </div>
-                        </div> : null
+                        </div>
                       ),
-                    },
+                    }] : []),
                     {
                       title: 'Acciones',
                       key: 'actions',
@@ -1590,7 +1592,9 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                       valueStyle={{ color: 'var(--color-error)', fontSize: '20px' }}
                     />
                     <div style={{ fontSize: '11px', color: 'var(--color-text-secondary)', marginTop: '4px' }}>
-                      {analytics.executiveSummary?.over_budget_projects || 0} sobre presupuesto
+                      {analytics.executiveSummary?.over_budget_projects === undefined
+                        ? 'requieren atención'
+                        : `${analytics.executiveSummary.over_budget_projects} sobre presupuesto`}
                     </div>
                   </Card>
                 </Col>
@@ -1626,8 +1630,8 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
 
               {/* Main Analytics Grid */}
               <Row gutter={[16, 16]} style={{ marginBottom: '24px' }}>
-                {/* Budget Performance */}
-                <Col xs={24} lg={12}>
+                {/* Budget Performance: el backend la envía solo a team_lead */}
+                {showBudgetAnalytics && <Col xs={24} lg={12}>
                   <Card 
                     title={
                       <span>
@@ -1686,10 +1690,10 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                       ))}
                     </div>
                   </Card>
-                </Col>
+                </Col>}
 
                 {/* Schedule Performance */}
-                <Col xs={24} lg={12}>
+                <Col xs={24} lg={showBudgetAnalytics ? 12 : 24}>
                   <Card 
                     title={
                       <span>
@@ -1864,11 +1868,13 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                             <div style={{ fontSize: '10px', color: 'var(--color-text-secondary)' }}>
                               Velocidad: {member.avg_velocity?.toFixed(1) || 'N/A'}
                             </div>
-                            <div style={{ fontSize: '11px', marginTop: '2px' }}>
-                              <Tag color={member.avg_budget_variance > 10 ? 'red' : member.avg_budget_variance > 0 ? 'orange' : 'green'}>
-                                {member.avg_budget_variance > 0 ? '+' : ''}{member.avg_budget_variance?.toFixed(1) || 0}% budget
-                              </Tag>
-                            </div>
+                            {member.avg_budget_variance !== undefined && (
+                              <div style={{ fontSize: '11px', marginTop: '2px' }}>
+                                <Tag color={member.avg_budget_variance > 10 ? 'red' : member.avg_budget_variance > 0 ? 'orange' : 'green'}>
+                                  {member.avg_budget_variance > 0 ? '+' : ''}{member.avg_budget_variance?.toFixed(1) || 0}% budget
+                                </Tag>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -1994,7 +2000,7 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                           width: 80,
                           render: (value: number) => `${value?.toFixed(0) || 0}%`
                         },
-                        { 
+                        ...(showBudgetAnalytics ? [{ 
                           title: 'En Presupuesto', 
                           dataIndex: 'on_budget_rate', 
                           key: 'on_budget_rate',
@@ -2004,7 +2010,7 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                               {value?.toFixed(0) || 0}%
                             </Tag>
                           )
-                        }
+                        }] : [])
                       ]}
                       size="small"
                       pagination={false}
