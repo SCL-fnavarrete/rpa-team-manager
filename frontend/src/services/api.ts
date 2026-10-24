@@ -7,6 +7,7 @@ import { NotificationItem } from '../types/notification';
 import { TeamCostsResponse } from '@/types/teamCosts';
 import { CostCenter, ProjectCostCenterAllocation, CostCenterBillingSummaryRow } from '@/types/costCenter';
 import { PortfolioFilters, PortfolioResult } from '@/types/portfolio';
+import { ClosureReport } from '@/types/closureReport';
 
 interface RequestCache {
   [key: string]: {
@@ -587,6 +588,17 @@ class ApiService {
 
   async deleteProjectCapacity(projectId: number, userId: number): Promise<void> {
     await this.api.delete(`/commercial/projects/${projectId}/capacity/${userId}`);
+  }
+
+  // Informe de cierre (solo team_lead): el backend responde { data: ClosureReport } y el PDF exige el token
+  async getClosureReport(projectId: number): Promise<ClosureReport> {
+    const response = await this.api.get(`/commercial/projects/${projectId}/closure-report`);
+    return response.data.data;
+  }
+
+  async downloadClosureReportPdf(projectId: number): Promise<Blob> {
+    const response = await this.api.get(`/commercial/projects/${projectId}/closure-report.pdf`, { responseType: 'blob' });
+    return response.data;
   }
 
   // Timesheet endpoints (Fase 3 - Tiempo confiable y efectividad)

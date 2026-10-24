@@ -36,7 +36,8 @@ import {
   FundOutlined,
   RobotOutlined,
   RocketOutlined,
-  MessageOutlined
+  MessageOutlined,
+  FileDoneOutlined
 } from '@ant-design/icons';
 import { ProjectROICard } from '@/components/projects/ProjectROICard';
 import { ProjectHealthCard } from '@/components/projects/ProjectHealthCard';
@@ -46,6 +47,7 @@ import { ProjectPMOView } from '@/components/projects/ProjectPMOView';
 import { ProjectMilestonesAndLog } from '@/components/projects/ProjectMilestonesAndLog';
 import { ProjectMLAnalytics } from '@/components/projects/ProjectMLAnalytics';
 import { CreateProjectModal } from '@/components/projects/CreateProjectModal';
+import { ProjectClosureReportModal } from '@/components/projects/ProjectClosureReportModal';
 import { FileManager, EvidenceGallery } from '@/components/files';
 import { ProjectLifecyclePage } from '@/pages/lifecycle/ProjectLifecyclePage';
 import { useProjectStore } from '@/store/projectStore';
@@ -70,6 +72,7 @@ export const ProjectDetailPage: React.FC = () => {
   const [tasks, setTasks] = useState<any[]>([]);
   const [health, setHealth] = useState<ProjectHealth | null>(null);
   const [editModalVisible, setEditModalVisible] = useState(false);
+  const [closureOpen, setClosureOpen] = useState(false);
   const initialTab = ['commercial', 'billing', 'lifecycle', 'pmo', 'files'].includes(searchParams.get('tab') || '') ? searchParams.get('tab')! : 'overview';
   const [activeTab, setActiveTab] = useState(initialTab);
   const [commercialTab, setCommercialTab] = useState('commercial');
@@ -239,6 +242,9 @@ export const ProjectDetailPage: React.FC = () => {
                       Entrega aceptada · Cobranza pendiente
                     </Tag>
                   )
+                )}
+                {user?.role === 'team_lead' && (
+                  <Button size="small" icon={<FileDoneOutlined />} onClick={() => setClosureOpen(true)}>Informe de cierre</Button>
                 )}
                 <span className={`project-priority-pill priority-${project.priority}`}><span />Prioridad {priorityLabel.toLowerCase()}</span>
                 {health && <span className={`project-health-pill health-${health.semaphore}`}><span />{healthLabels[health.semaphore]}</span>}
@@ -670,6 +676,10 @@ export const ProjectDetailPage: React.FC = () => {
         onSuccess={handleEditSuccess}
         editProject={project}
       />
+
+      {user?.role === 'team_lead' && (
+        <ProjectClosureReportModal projectId={project.id} open={closureOpen} onClose={() => setClosureOpen(false)} />
+      )}
     </main>
   );
 };
