@@ -27,6 +27,9 @@ export interface PortfolioResult {
 
 const UNASSIGNED_REP_NAME = 'Sin asignar';
 
+/** Proyectos perdidos o cancelados: negocio no realizado, no suman a venta ni a costo de la cartera. */
+const isUnrealized = (row: PortfolioRow): boolean => row.commercial_stage === 'lost' || row.status === 'cancelled';
+
 const PROJECT_JOINS = `
     FROM projects p
     LEFT JOIN clients c ON c.id = p.client_id
@@ -64,7 +67,7 @@ export class PortfolioService {
             `SELECT i.project_id, pay.currency, SUM(pay.amount) AS amount
              FROM payments pay
              JOIN invoices i ON i.id = pay.invoice_id
-             WHERE i.project_id IN (${this.placeholders(projectIds)})
+             WHERE i.status <> 'cancelled' AND i.project_id IN (${this.placeholders(projectIds)})
              GROUP BY i.project_id, pay.currency`,
             projectIds
         );
@@ -123,25 +126,30 @@ export class PortfolioService {
         };
     }
 
+    /**
+     * Venta, costo y pendiente por facturar solo suman negocio realizado (sin perdidos ni cancelados);
+     * lo facturado y cobrado suma todas las filas porque es dinero real, y projects cuenta las filas devueltas.
+     */
     private buildTotals(rows: PortfolioRow[]): PortfolioResult['totals'] {
-        const sum = (pick: (row: PortfolioRow) => number) => rows.reduce((acc, row) => acc + pick(row), 0);
+        const sum = (list: PortfolioRow[], pick: (row: PortfolioRow) => number) => list.reduce((acc, row) => acc + pick(row), 0);
+        const realized = rows.filter(r => !isUnrealized(r));
         return {
             projects: rows.length,
-            sale_price: sum(r => r.sale_price),
-            real_cost: sum(r => r.real_cost),
-            projected_cost: sum(r => r.projected_cost),
-            projected_profit: sum(r => r.projected_profit),
-            invoiced_clp: sum(r => r.invoiced_clp),
-            collected_clp: sum(r => r.collected_clp),
-            pending_to_invoice_clp: sum(r => r.pending_to_invoice_clp)
+            sale_price: sum(realized, r => r.sale_price),
+            real_cost: sum(realized, r => r.real_cost),
+            projected_cost: sum(realized, r => r.projected_cost),
+            projected_profit: sum(realized, r => r.projected_profit),
+            invoiced_clp: sum(rows, r => r.invoiced_clp),
+            collected_clp: sum(rows, r => r.collected_clp),
+            pending_to_invoice_clp: sum(realized, r => r.pending_to_invoice_clp)
         };
     }
 
-    /** Venta por comercial sobre las filas ya filtradas; los proyectos perdidos no cuentan como venta. */
+    /** Venta por comercial sobre las filas ya filtradas; los proyectos perdidos o cancelados no cuentan como venta. */
     private buildSalesByRep(rows: PortfolioRow[]): PortfolioResult['sales_by_rep'] {
         const byRep = new Map<number | null, PortfolioResult['sales_by_rep'][number]>();
         for (const row of rows) {
-            if (row.commercial_stage === 'lost') continue;
+            if (isUnrealized(row)) continue;
             const entry = byRep.get(row.sales_rep_id) ?? {
                 sales_rep_id: row.sales_rep_id,
                 sales_rep_name: row.sales_rep_name ?? UNASSIGNED_REP_NAME,

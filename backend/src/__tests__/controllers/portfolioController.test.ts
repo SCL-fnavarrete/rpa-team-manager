@@ -35,6 +35,7 @@ const EMPTY_TOTALS = {
 interface SeedProject {
     name: string;
     stage?: 'quoting' | 'approved' | 'lost';
+    status?: 'active' | 'on_hold' | 'completed' | 'cancelled';
     clientId?: number | null;
     repId?: number | null;
     areaId?: number | null;
@@ -96,8 +97,8 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
 
     async function addProject(p: SeedProject): Promise<number> {
         const { id } = await testDb.run(
-            `INSERT INTO projects (name, commercial_stage, client_id, sales_rep_id, area_id) VALUES (?, ?, ?, ?, ?)`,
-            [p.name, p.stage ?? 'approved', p.clientId ?? null, p.repId ?? null, p.areaId ?? null]
+            `INSERT INTO projects (name, status, commercial_stage, client_id, sales_rep_id, area_id) VALUES (?, ?, ?, ?, ?, ?)`,
+            [p.name, p.status ?? 'active', p.stage ?? 'approved', p.clientId ?? null, p.repId ?? null, p.areaId ?? null]
         );
         if (p.salePrice !== undefined || p.budgetedCost !== undefined || p.budgetedHours !== undefined) {
             await testDb.run(
@@ -212,16 +213,17 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
         expect(byId.get(alDia)).toBe('green');
     });
 
-    it('facturado = facturas no borrador/anuladas, cobrado = suma de pagos, por facturar = max(venta - facturado, 0), con conversión a CLP', async () => {
+    it('facturado = facturas no borrador/anuladas, cobrado = suma de pagos (sin facturas anuladas), por facturar = max(venta - facturado, 0), con conversión a CLP', async () => {
         const proyecto = await addProject({ name: 'Con facturas', salePrice: 1000000 });
         const facturaClp = await addInvoice(proyecto, 300000, 'CLP');
         const facturaUf = await addInvoice(proyecto, 5, 'UF', 'partially_paid'); // 5 UF x 40.000 = 200.000
         const facturaUsd = await addInvoice(proyecto, 100, 'USD', 'paid'); // 100 USD x 950 = 95.000
         await addInvoice(proyecto, 999999, 'CLP', 'draft');
-        await addInvoice(proyecto, 888888, 'CLP', 'cancelled');
+        const facturaAnulada = await addInvoice(proyecto, 888888, 'CLP', 'cancelled');
         await addPayment(facturaClp, 100000, 'CLP');
         await addPayment(facturaUf, 2, 'UF'); // 80.000
         await addPayment(facturaUsd, 100, 'USD'); // 95.000
+        await addPayment(facturaAnulada, 50000, 'CLP'); // factura anulada: no cuenta como cobrado
         const sobrefacturado = await addProject({ name: 'Sobrefacturado', salePrice: 100000 });
         await addInvoice(sobrefacturado, 150000, 'CLP');
 
@@ -237,6 +239,33 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
         expect(result.totals).toMatchObject({
             sale_price: 1100000, invoiced_clp: 745000, collected_clp: 275000, pending_to_invoice_clp: 405000
         });
+    });
+
+    it('los totales excluyen de venta, costo y por facturar los proyectos perdidos y cancelados, pero suman todo lo facturado y cobrado, y cuadran con sales_by_rep', async () => {
+        const rep = await addRep('Ana');
+        const vigente = await addProject({ name: 'Vigente', repId: rep, salePrice: 1000000, budgetedCost: 600000, budgetedHours: 10 });
+        const perdido = await addProject({ name: 'Perdido', repId: rep, stage: 'lost', salePrice: 5000000, budgetedCost: 100000, budgetedHours: 10 });
+        const cancelado = await addProject({ name: 'Cancelado', repId: rep, status: 'cancelled', salePrice: 3000000, budgetedCost: 200000, budgetedHours: 10 });
+        const facturaVigente = await addInvoice(vigente, 300000, 'CLP');
+        await addPayment(facturaVigente, 100000, 'CLP');
+        const facturaCancelado = await addInvoice(cancelado, 50000, 'CLP');
+        await addPayment(facturaCancelado, 20000, 'CLP');
+
+        const result = await portfolioService.getPortfolio();
+
+        // las filas siguen mostrando cada proyecto con sus propias cifras
+        expect(result.rows).toHaveLength(3);
+        const rowOf = (id: number) => result.rows.find(r => r.project_id === id)!;
+        expect(rowOf(perdido)).toMatchObject({ sale_price: 5000000, pending_to_invoice_clp: 5000000 });
+        expect(rowOf(cancelado)).toMatchObject({ sale_price: 3000000, invoiced_clp: 50000, collected_clp: 20000 });
+        expect(result.totals).toEqual({
+            projects: 3,
+            sale_price: 1000000, real_cost: 600000, projected_cost: 600000, projected_profit: 400000,
+            invoiced_clp: 350000, collected_clp: 120000,
+            pending_to_invoice_clp: 700000
+        });
+        const ventaPorComercial = result.sales_by_rep.reduce((acc, r) => acc + r.sale_price, 0);
+        expect(ventaPorComercial).toBe(result.totals.sale_price);
     });
 
     it("pipeline lista solo proyectos en commercial_stage 'quoting' con el monto de su última cotización", async () => {
@@ -271,6 +300,7 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
         await addProject({ name: 'A1', repId: repA, salePrice: 1000000 });
         await addProject({ name: 'A2', repId: repA, salePrice: 500000 });
         await addProject({ name: 'A perdido', repId: repA, stage: 'lost', salePrice: 9999999 });
+        await addProject({ name: 'A cancelado', repId: repA, status: 'cancelled', salePrice: 7777777 });
         await addProject({ name: 'B1', repId: repB, salePrice: 700000 });
         await addProject({ name: 'Huérfano', salePrice: 200000 });
 
@@ -404,9 +434,14 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
         expect(vacio.status).toBe(200);
         expect(vacio.body.data.rows).toHaveLength(2);
 
-        for (const invalid of ['client_id=abc', 'sales_rep_id=-1', 'area_id=1.5', 'commercial_stage=ganado']) {
+        for (const [invalid, field] of [
+            ['client_id=abc', 'client_id'], ['sales_rep_id=-1', 'sales_rep_id'],
+            ['area_id=1.5', 'area_id'], ['commercial_stage=ganado', 'commercial_stage']
+        ]) {
             const res = await get(invalid);
-            expect({ invalid, status: res.status }).toEqual({ invalid, status: 400 });
+            expect({ invalid, status: res.status, error: res.body.error }).toEqual({
+                invalid, status: 400, error: `Filtro inválido: ${field}`
+            });
         }
     });
 });

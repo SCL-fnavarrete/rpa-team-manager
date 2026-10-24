@@ -16,7 +16,7 @@ export class PortfolioController {
                 if (raw === undefined || raw === '') continue;
                 const id = typeof raw === 'string' ? Number(raw) : NaN;
                 if (!Number.isInteger(id) || id <= 0) {
-                    res.status(400).json({ error: `Invalid filter: ${key}` });
+                    res.status(400).json({ error: `Filtro inválido: ${key}` });
                     return;
                 }
                 filters[key] = id;
@@ -25,7 +25,7 @@ export class PortfolioController {
             const stage = req.query.commercial_stage;
             if (stage !== undefined && stage !== '') {
                 if (typeof stage !== 'string' || !COMMERCIAL_STAGES.includes(stage)) {
-                    res.status(400).json({ error: 'Invalid filter: commercial_stage' });
+                    res.status(400).json({ error: 'Filtro inválido: commercial_stage' });
                     return;
                 }
                 filters.commercial_stage = stage as PortfolioFilters['commercial_stage'];
@@ -35,7 +35,7 @@ export class PortfolioController {
             res.json({ data });
         } catch (error) {
             logger.error('Get portfolio error:', error);
-            res.status(500).json({ error: 'Failed to get portfolio' });
+            res.status(500).json({ error: 'Error al obtener la cartera' });
         }
     };
 }
