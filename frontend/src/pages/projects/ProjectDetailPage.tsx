@@ -48,6 +48,7 @@ import { ProjectMilestonesAndLog } from '@/components/projects/ProjectMilestones
 import { ProjectMLAnalytics } from '@/components/projects/ProjectMLAnalytics';
 import { CreateProjectModal } from '@/components/projects/CreateProjectModal';
 import { ProjectClosureReportModal } from '@/components/projects/ProjectClosureReportModal';
+import { hasClientApproval } from '@/utils/saleRealization';
 import { FileManager, EvidenceGallery } from '@/components/files';
 import { ProjectLifecyclePage } from '@/pages/lifecycle/ProjectLifecyclePage';
 import { useProjectStore } from '@/store/projectStore';
@@ -243,7 +244,7 @@ export const ProjectDetailPage: React.FC = () => {
                     </Tag>
                   )
                 )}
-                {user?.role === 'team_lead' && (
+                {user?.role === 'team_lead' && hasClientApproval(project) && (
                   <Button size="small" icon={<FileDoneOutlined />} onClick={() => setClosureOpen(true)}>Informe de cierre</Button>
                 )}
                 <span className={`project-priority-pill priority-${project.priority}`}><span />Prioridad {priorityLabel.toLowerCase()}</span>

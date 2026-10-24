@@ -71,6 +71,16 @@ const buildComparison = ({ quoted, actual }: ClosureReport): ComparisonRow[] => 
   }
 ];
 
+/** Mensaje y tono de la alerta de pendientes; ya cerradas las finanzas, "listo para cerrar" deja de tener sentido. */
+const closureAlert = ({ project, can_close_financials }: ClosureReport): { type: 'success' | 'warning'; message: string } => {
+  if (project.financial_closed_at) {
+    return { type: 'success', message: `Cierre financiero completado el ${formatTimestamp(project.financial_closed_at)}` };
+  }
+  return can_close_financials
+    ? { type: 'success', message: 'Sin pendientes bloqueantes para el cierre financiero' }
+    : { type: 'warning', message: 'Aún hay pendientes bloqueantes para el cierre financiero' };
+};
+
 const pendingLabel = (count: number): string => (count === 0 ? 'Sin pendientes' : `${count} ${count === 1 ? 'pendiente' : 'pendientes'}`);
 
 const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
@@ -145,6 +155,7 @@ export const ProjectClosureReportModal: React.FC<ProjectClosureReportModalProps>
   const renderContent = (current: ClosureReport) => {
     const { project, quoted, actual } = current;
     const hasQuote = quoted.version !== null;
+    const closure = closureAlert(current);
 
     const comparison: TableColumnsType<ComparisonRow> = [
       { title: 'Concepto', dataIndex: 'label', key: 'label' },
@@ -178,18 +189,11 @@ export const ProjectClosureReportModal: React.FC<ProjectClosureReportModalProps>
           <Text>Estado: {PROJECT_STATUS_LABEL[project.status] ?? project.status}</Text>
           <Text>{scheduleLabel(project)}</Text>
           <Text>Entrega aceptada: {project.delivery_accepted_at ? formatTimestamp(project.delivery_accepted_at) : 'Pendiente'}</Text>
-          <Text>Cierre financiero: {project.financial_closed_at ? formatTimestamp(project.financial_closed_at) : 'Pendiente'}</Text>
+          {!project.financial_closed_at && <Text>Cierre financiero: Pendiente</Text>}
         </Space>
 
         <Section title="Pendientes">
-          <Alert
-            type={current.can_close_financials ? 'success' : 'warning'}
-            showIcon
-            message={current.can_close_financials
-              ? 'Sin pendientes bloqueantes para el cierre financiero'
-              : 'Aún hay pendientes bloqueantes para el cierre financiero'}
-            style={{ marginBottom: 8 }}
-          />
+          <Alert type={closure.type} message={closure.message} showIcon style={{ marginBottom: 8 }} />
           <List
             size="small"
             dataSource={current.checklist}

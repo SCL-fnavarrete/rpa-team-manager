@@ -176,6 +176,26 @@ describe('ProjectClosureReportModal', () => {
     expect(screen.queryByText('Aún hay pendientes bloqueantes para el cierre financiero')).not.toBeInTheDocument();
   });
 
+  it('ya cerradas las finanzas muestra "Cierre financiero completado el <fecha>" en vez de si está listo para cerrar', async () => {
+    for (const canClose of [true, false]) {
+      mockReport(makeReport({ can_close_financials: canClose, project: { financial_closed_at: '2026-10-26 12:00:00' } }));
+      const { unmount } = renderModal();
+
+      expect(await screen.findByText('Cierre financiero completado el 26/10/2026')).toBeInTheDocument();
+      expect(screen.queryByText('Sin pendientes bloqueantes para el cierre financiero')).not.toBeInTheDocument();
+      expect(screen.queryByText('Aún hay pendientes bloqueantes para el cierre financiero')).not.toBeInTheDocument();
+      expect(screen.queryByText('Cierre financiero: Pendiente')).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it('antes del cierre financiero indica que está pendiente y no habla de cierre completado', async () => {
+    renderModal();
+
+    expect(await screen.findByText('Cierre financiero: Pendiente')).toBeInTheDocument();
+    expect(screen.queryByText(/Cierre financiero completado/)).not.toBeInTheDocument();
+  });
+
   it('muestra las fechas del proyecto o "Fechas: sin registrar" cuando inicio y término son nulos', async () => {
     const { unmount } = renderModal();
     expect(await screen.findByText('Inicio: 01/03/2026 — Término: 30/09/2026')).toBeInTheDocument();
