@@ -4,7 +4,7 @@
 
 **Goal:** Corregir los defectos críticos e importantes que el recorrido en navegador encontró en el Cotizador RPA, para que lo guardado coincida con lo mostrado, editar no destruya datos, "Convertir en Proyecto" funcione y el módulo respete los permisos de costos/márgenes.
 
-**Architecture:** Tres tareas secuenciales: (Task 1) backend — validación, permisos con saneamiento de costos internos, semántica de actualización con horas manuales persistidas, conversión a proyecto transaccional, tarifas por moneda; (Task 2) frontend — formulario/estado del wizard (guardar y editar sin pérdida, monedas, errores visibles); (Task 3) frontend — propuesta, impresión, textos, tema y visibilidad por rol.
+**Architecture:** Cuatro tareas secuenciales (la 4 se agregó tras la revisión final de la Fase 6G): (Task 1) backend — validación, permisos con saneamiento de costos internos, semántica de actualización con horas manuales persistidas, conversión a proyecto transaccional, tarifas por moneda; (Task 2) frontend — formulario/estado del wizard (guardar y editar sin pérdida, monedas, errores visibles); (Task 3) frontend — propuesta, impresión, textos, tema y visibilidad por rol; (Task 4) Centro PMO ejecutivo — costos y márgenes solo para `team_lead`.
 
 **Tech Stack:** Node/Express/SQLite3/Jest (backend), React 18 + Ant Design v5 + Vitest (frontend).
 
@@ -122,6 +122,35 @@
   Run: `cd frontend && npx vitest run src/__tests__/components/TechnicalEconomicProposalModal.test.tsx src/__tests__/pages/ScopingPage.test.tsx && npx tsc --noEmit && npm run check:theme && npm run lint`
   Expected: PASS y sin errores.
 - [ ] **Step 5: Commit** — `fix(cotizador): propuesta honesta, impresión, textos, tema y visibilidad de costos por rol`
+
+---
+
+### Task 4: Centro PMO ejecutivo — costos y márgenes solo para team_lead, cifras alineadas con la cartera
+
+Origen: la revisión final de la Fase 6G (2026-10-24) encontró que `GET /api/pmo/executive-suite` (commit `dc15ebc`, `authorize(['team_lead','rpa_operations','billing'])` en `backend/src/routes/pmoRoutes.ts:29`) devuelve margen y costos (`avg_margin_pct`, `total_gross_profit_clp`, `real_cost_clp` por proyecto, `pmoController.ts` ~1373, 1384-1387, 1685-1687) a `rpa_operations` y `billing`, lo que rompe la decisión 7 (costos y márgenes solo `team_lead`; Facturación ve montos de hitos y facturas, sin sueldos ni márgenes). Además sus cifras de venta/margen difieren de la nueva "Cartera de proyectos": incluye proyectos perdidos (`status != 'cancelled'` ~línea 1298) y cae a la tabla muerta `project_pmo_metrics` (~1329-1331).
+
+**Files:**
+- Modify: `backend/src/controllers/pmoController.ts` (`getPMOExecutiveSuite`), `backend/src/routes/pmoRoutes.ts` (solo si hace falta)
+- Modify: `frontend/src/types/pmo.ts`, `frontend/src/pages/pmo/PMODashboard.tsx` y las vistas `frontend/src/components/pmo/views/PMO*View.tsx` (ocultar lo que el backend omite)
+- Test: `backend/src/__tests__/controllers/pmoController.executiveSuite.test.ts` (crear, SQLite real), test frontend de las vistas si hay molde
+
+**Interfaces:**
+- Produces: para roles distintos de `team_lead`, la respuesta de `/api/pmo/executive-suite` NO incluye ningún campo de costo, utilidad o margen (identifica todos los de `getPMOExecutiveSuite` y `frontend/src/types/pmo.ts`); `billing` conserva montos de hitos, facturas, cartera vencida y aging; `rpa_operations` conserva alertas, riesgos, scope creep e imputaciones faltantes. Los tipos del frontend marcan esos campos como opcionales.
+- Produces: el cálculo de venta/margen del `team_lead` usa el mismo criterio que `portfolioService` ("realizado" = no cancelado y etapa comercial aprobada; ver `backend/src/services/portfolioService.ts`, `isUnrealized` o equivalente tras la ola de correcciones de la Fase 6G) y no usa `project_pmo_metrics`; si ya calcula con `financeService`, no se reescribe.
+
+- [ ] **Step 1: Escribir tests que fallan**
+  - `rpa_operations y billing no reciben campos de costo, utilidad ni margen en executive-suite` (verificar recursivamente que ninguna clave del JSON contenga cost, profit o margin, salvo las de cobranza que se decida conservar y se documenten en el test).
+  - `team_lead sigue recibiendo margen y utilidad`.
+  - `la venta consolidada excluye proyectos perdidos, cancelados y en cotización, igual que la cartera` (mismos datos sembrados que usa `portfolioController.test.ts`).
+  - `sin filas en project_pmo_metrics el P&L no se vacía ni se rompe`.
+- [ ] **Step 2: Correr y ver el fallo**
+  Run: `cd backend && npx jest src/__tests__/controllers/pmoController.executiveSuite.test.ts`
+  Expected: FAIL.
+- [ ] **Step 3: Implementar** — filtrar la respuesta por rol dentro del controlador con una función pura `stripFinancials(data, role)` testeable; alinear el criterio de venta/margen con la cartera y eliminar el fallback a `project_pmo_metrics`; en el frontend, tolerar campos ausentes y ocultar las tarjetas/columnas de margen y costo cuando no vienen (sin huecos ni `NaN`); no cambiar rutas ni los roles autorizados a ver la vista.
+- [ ] **Step 4: Verificar**
+  Run: `cd backend && npx jest src/__tests__/controllers/pmoController.executiveSuite.test.ts && npm test && npx tsc --noEmit && npm run lint`; `cd frontend && npx tsc --noEmit && npm run check:theme && npm run lint` y los tests de las vistas PMO si existen.
+  Expected: PASS y sin errores.
+- [ ] **Step 5: Commit** — `fix(pmo): costos y márgenes del Centro PMO solo para team_lead y cifras alineadas con la cartera`
 
 ---
 
