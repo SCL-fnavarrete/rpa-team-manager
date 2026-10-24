@@ -1,15 +1,27 @@
-import { Router } from 'express';
+import { NextFunction, Response, Router } from 'express';
 import { z } from 'zod';
-import { authenticate, authorize } from '../middleware/auth';
+import { authenticate, AuthenticatedRequest } from '../middleware/auth';
 import { validate } from '../middleware/validation';
 import { calculateScopingSchema, createScopingSchema, updateScopingSchema } from '../validation/schemas';
 import { ScopingController } from '../controllers/scopingController';
+import { UserRole } from '../types/auth';
 
 const router = Router();
 const controller = new ScopingController();
 
-// Mismos roles que pueden crear proyectos (POST /api/projects)
-const convertRoles = authorize(['team_lead', 'rpa_operations']);
+// Mismos roles que pueden crear proyectos (POST /api/projects). Guard propio (no `authorize`) para que el
+// 403 salga en español y con el formato { success: false, error } del resto del módulo.
+const CONVERT_ROLES: UserRole[] = ['team_lead', 'rpa_operations'];
+const requireConvertRole = (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
+  if (!req.user || !CONVERT_ROLES.includes(req.user.role)) {
+    res.status(403).json({
+      success: false,
+      error: 'Solo el jefe de equipo u operaciones pueden convertir un levantamiento en proyecto'
+    });
+    return;
+  }
+  next();
+};
 
 // Los mensajes del esquema ya van en español: se devuelven tal cual como { success: false, error }
 const validateBody = (schema: z.ZodSchema) => validate({ body: schema }, { inlineErrors: true });
@@ -30,6 +42,6 @@ router.put('/:id', validateBody(updateScopingSchema), controller.update);
 router.delete('/:id', controller.delete);
 
 // Conversión a Proyecto Formal del Portafolio
-router.post('/:id/convert-to-project', convertRoles, controller.convertToProject);
+router.post('/:id/convert-to-project', requireConvertRole, controller.convertToProject);
 
 export default router;

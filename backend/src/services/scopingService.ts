@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { db } from '../database/database';
 import {
   ScopingCalculationEngine,
@@ -192,21 +193,6 @@ export class ScopingService {
   }
 
   /**
-   * Genera el siguiente código COT-YYYY-NNN. El correlativo sale de la secuencia AUTOINCREMENT de la tabla
-   * (nunca retrocede), así que borrar el último levantamiento no libera su código para otra propuesta.
-   */
-  private async generateNextCode(): Promise<string> {
-    const prefix = `COT-${new Date().getFullYear()}-`;
-    const sequence = await db.get(`SELECT seq FROM sqlite_sequence WHERE name = 'scoping_quotations'`) as { seq: number } | undefined;
-    const codeFor = (number: number) => `${prefix}${String(number).padStart(3, '0')}`;
-
-    let next = (sequence?.seq ?? 0) + 1;
-    // Códigos asignados con la lógica anterior (MAX(code)+1) pueden ocupar ya ese correlativo
-    while (await db.get('SELECT 1 FROM scoping_quotations WHERE code = ?', [codeFor(next)])) next++;
-    return codeFor(next);
-  }
-
-  /**
    * Lista todos los levantamientos con filtros y métricas globales
    */
   public async getAll(filters: { client?: string; status?: string; archetype?: string; search?: string } = {}) {
@@ -312,14 +298,20 @@ export class ScopingService {
       }
     };
 
-    const calc = ScopingCalculationEngine.calculate(inputs);
+    // Una fila con datos dañados debe poder verse, repararse (PUT) o borrarse: sin cálculo reconstruido, pero sin error
+    let calculation: ScopingCalculationResult | undefined;
+    try {
+      calculation = ScopingCalculationEngine.calculate(inputs);
+    } catch (error) {
+      logger.warn(`Levantamiento ${row.id}: sus datos guardados no permiten reconstruir el cálculo`, error);
+    }
 
     return {
       ...record,
       uses_vdi: Boolean(row.uses_vdi),
       requires_ocr: Boolean(row.requires_ocr),
       custom_hours: parseCustomHours(custom_hours_json),
-      calculation: calc
+      calculation
     };
   }
 
@@ -327,12 +319,15 @@ export class ScopingService {
    * Crea un nuevo levantamiento / cotización
    */
   public async create(data: Record<string, any>, actor: ScopingActor): Promise<ScopingRecord> {
-    const resolved = this.resolveFields(data);
+    const resolved = this.resolveFields(data, actor);
     this.assertStatusAssignable(resolved.details.status);
 
     const calc = ScopingCalculationEngine.calculate(resolved.inputs);
+    // El código COT-YYYY-NNN se deriva del id que asigna la base (AUTOINCREMENT: nunca se repite, ni siquiera
+    // tras borrar el último). Se inserta con un código temporal único y se corrige en seguida, sin leer antes un
+    // correlativo que otra creación simultánea podría tomar.
     const columns = {
-      code: await this.generateNextCode(),
+      code: `TMP-${randomUUID()}`,
       created_by: actor.id,
       ...this.buildColumns(resolved, calc)
     };
@@ -343,7 +338,16 @@ export class ScopingService {
       Object.values(columns)
     );
     const newId = result.id!;
-    logger.info(`Levantamiento/Cotización creada exitosamente con ID ${newId} y código ${columns.code}`);
+    const code = `COT-${new Date().getFullYear()}-${String(newId).padStart(3, '0')}`;
+    try {
+      await db.run('UPDATE scoping_quotations SET code = ? WHERE id = ?', [code, newId]);
+    } catch (error) {
+      // No dejar un levantamiento con código temporal
+      await db.run('DELETE FROM scoping_quotations WHERE id = ?', [newId])
+        .catch((cleanupError) => logger.error('No se pudo limpiar el levantamiento sin código definitivo:', cleanupError));
+      throw error;
+    }
+    logger.info(`Levantamiento/Cotización creada exitosamente con ID ${newId} y código ${code}`);
 
     return (await this.getById(newId))!;
   }
@@ -358,7 +362,7 @@ export class ScopingService {
       throw new ConflictError('No se puede modificar un levantamiento que ya fue convertido a proyecto');
     }
 
-    const resolved = this.resolveFields(data, existing);
+    const resolved = this.resolveFields(data, actor, existing);
     this.assertStatusAssignable(resolved.details.status, existing.status);
 
     const calc = ScopingCalculationEngine.calculate(resolved.inputs);
@@ -403,7 +407,10 @@ export class ScopingService {
       );
     }
 
-    const calc = scoping.calculation!;
+    const calc = scoping.calculation;
+    if (!calc) {
+      throw new ConflictError('Los datos guardados del levantamiento no son válidos: corrígelos antes de convertirlo en proyecto');
+    }
     if (scoping.viability_status !== 'viable') {
       throw new ConflictError(`No se puede convertir a proyecto un levantamiento no viable (${calc.viability_label})`);
     }
@@ -566,8 +573,10 @@ export class ScopingService {
   /**
    * Une el cuerpo recibido con el registro guardado (si existe): lo ausente se conserva, null limpia
    * campos opcionales. Al cambiar de moneda sin enviar tarifas, se usan las tarifas por defecto de la nueva moneda.
+   * La tarifa interna solo la fija team_lead (el resto de los roles ni siquiera la ve): si la envía otro rol se
+   * ignora y rige la guardada, o la por defecto de la moneda al crear.
    */
-  private resolveFields(data: Record<string, any>, existing?: ScopingRecord): ResolvedScoping {
+  private resolveFields(data: Record<string, any>, actor: ScopingActor, existing?: ScopingRecord): ResolvedScoping {
     const current = existing as Record<string, any> | undefined;
     const pick = (key: string, fallback?: any) => (data[key] !== undefined ? data[key] : current ? current[key] : fallback);
     const optional = (key: string, fallback?: any) => pick(key, fallback) ?? undefined;
@@ -575,7 +584,10 @@ export class ScopingService {
 
     const currency = pick('currency', 'CLP');
     const currencyChanged = current !== undefined && currency !== current.currency;
-    const rate = (key: string) => (data[key] !== undefined ? data[key] : current && !currencyChanged ? current[key] ?? undefined : undefined);
+    const rate = (key: string, writable = true) => {
+      if (writable && data[key] !== undefined) return data[key];
+      return current && !currencyChanged ? current[key] ?? undefined : undefined;
+    };
     const customHours = data.custom_hours !== undefined ? normalizeCustomHours(data.custom_hours) : (existing?.custom_hours ?? null);
 
     const inputs: ScopingInputs = {
@@ -599,7 +611,7 @@ export class ScopingService {
       currency,
       hourly_labor_cost: rate('hourly_labor_cost'),
       target_hourly_rate: rate('target_hourly_rate'),
-      internal_cost_rate: rate('internal_cost_rate'),
+      internal_cost_rate: rate('internal_cost_rate', actor.role === 'team_lead'),
       custom_hours: customHours ?? undefined
     };
 

@@ -23,6 +23,7 @@ import express from 'express';
 import request from 'supertest';
 import scopingRoutes from '../../routes/scopingRoutes';
 import { RPA_ARCHETYPES } from '../../constants/rpaArchetypes';
+import { ScopingService } from '../../services/scopingService';
 import { createRealTestDb, realDbHolder, seedBasicUsers, RealTestDb, TestUsers } from '../helpers/realTestDb';
 
 const app = express();
@@ -407,8 +408,57 @@ describe('scopingRoutes API (SQLite real)', () => {
             expect(updated.status).toBe(200);
             expectNoInternalCosts(updated.body.data);
             expectNoInternalCosts(updated.body.data.calculation);
-            // El dato sigue guardado: solo se omite en la respuesta.
-            expect((await rowOf(created.body.data.id)).internal_cost_rate).toBe(99999);
+        });
+    });
+
+    describe('internal_cost_rate solo lo escribe team_lead', () => {
+        it('un developer no puede fijar internal_cost_rate al crear: se guarda el default de la moneda', async () => {
+            const created = await call(dev, 'post', '/api/scopings', { ...baseCreate, internal_cost_rate: 99999 });
+
+            expect(created.status).toBe(201);
+            expect((await rowOf(created.body.data.id)).internal_cost_rate).toBe(18000);
+        });
+
+        it('team_lead sí guarda internal_cost_rate al crear y al editar, y el costo del proyecto lo usa', async () => {
+            const created = await createQuote(lead, { internal_cost_rate: 25000 });
+            expect((await rowOf(created.id)).internal_cost_rate).toBe(25000);
+
+            const updated = await call(lead, 'put', `/api/scopings/${created.id}`, { internal_cost_rate: 27000 });
+
+            expect(updated.status).toBe(200);
+            const row = await rowOf(created.id);
+            expect(row.internal_cost_rate).toBe(27000);
+            expect(row.project_internal_cost).toBe(Math.round(row.total_hours * 27000));
+        });
+
+        it('un developer que edita su cotización no altera el internal_cost_rate que fijó el team_lead', async () => {
+            const own = await createQuote(dev);
+            await call(lead, 'put', `/api/scopings/${own.id}`, { internal_cost_rate: 25000 });
+
+            // El frontend reenvía la tarifa interna por defecto junto con el resto de las entradas
+            const edit = await call(dev, 'put', `/api/scopings/${own.id}`, { client_name: 'Editada por el autor', internal_cost_rate: 18000 });
+
+            expect(edit.status).toBe(200);
+            const row = await rowOf(own.id);
+            expect(row.internal_cost_rate).toBe(25000);
+            expect(row.project_internal_cost).toBe(Math.round(row.total_hours * 25000));
+            expect(row.client_name).toBe('Editada por el autor');
+        });
+
+        it('un developer que cambia la moneda no fija la tarifa interna: se usa el default de la nueva moneda', async () => {
+            const own = await createQuote(dev);
+
+            const edit = await call(dev, 'put', `/api/scopings/${own.id}`, { currency: 'USD', internal_cost_rate: 99999 });
+
+            expect(edit.status).toBe(200);
+            expect((await rowOf(own.id)).internal_cost_rate).toBe(20);
+        });
+
+        it('el valor enviado por un developer sigue validándose (negativo => 400)', async () => {
+            const res = await call(dev, 'post', '/api/scopings', { ...baseCreate, internal_cost_rate: -1 });
+
+            expect(res.status).toBe(400);
+            expect(res.body.error).toBe('El costo interno por hora debe ser un número mayor o igual a cero');
         });
     });
 
@@ -486,6 +536,65 @@ describe('scopingRoutes API (SQLite real)', () => {
         });
     });
 
+    describe('filas guardadas con datos inválidos', () => {
+        // [descripción, columnas dañadas a mano, cuerpo de PUT que la repara]
+        const corruptions: Array<[string, Record<string, unknown>, Record<string, unknown>]> = [
+            ['horas manuales negativas', { hours_pm: -10 }, { custom_hours: null }],
+            ['semanas en cero', { estimated_weeks: 0 }, { custom_hours: null }],
+            ['moneda fuera de catálogo', { currency: 'EUR' }, { currency: 'CLP' }],
+            ['frecuencia desconocida', { frequency: 'hourly' }, { frequency: 'daily' }]
+        ];
+
+        const corruptQuote = async (changes: Record<string, unknown>) => {
+            const created = await createQuote(dev);
+            const sets = Object.keys(changes).map((column) => `${column} = ?`).join(', ');
+            await testDb.run(`UPDATE scoping_quotations SET ${sets} WHERE id = ?`, [...Object.values(changes), created.id]);
+            return created;
+        };
+
+        it.each(corruptions)('GET responde 200 con la fila aunque tenga %s (sin el cálculo reconstruido)', async (_label, changes) => {
+            const created = await corruptQuote(changes);
+
+            const detail = await call(dev, 'get', `/api/scopings/${created.id}`);
+            const list = await call(dev, 'get', '/api/scopings');
+
+            expect(detail.status).toBe(200);
+            expect(detail.body.data).toMatchObject({ id: created.id, client_name: 'Acme SpA' });
+            expect(detail.body.data.calculation).toBeUndefined();
+            expect(list.status).toBe(200);
+            expect(list.body.data.map((row: any) => row.id)).toContain(created.id);
+        });
+
+        it.each(corruptions)('el autor puede borrar una fila con %s', async (_label, changes) => {
+            const created = await corruptQuote(changes);
+
+            const res = await call(dev, 'delete', `/api/scopings/${created.id}`);
+
+            expect(res.status).toBe(200);
+            expect(await rowOf(created.id)).toBeUndefined();
+        });
+
+        it.each(corruptions)('una fila con %s se repara editándola', async (_label, changes, repair) => {
+            const created = await corruptQuote(changes);
+
+            const res = await call(dev, 'put', `/api/scopings/${created.id}`, repair);
+
+            expect(res.status).toBe(200);
+            expect(res.body.data.calculation).toBeDefined();
+            expect(res.body.data.total_hours).toBe(236);
+        });
+
+        it('convertir una fila con datos inválidos responde 409 en español y no crea nada', async () => {
+            const created = await corruptQuote({ hours_pm: -10 });
+
+            const res = await call(lead, 'post', `/api/scopings/${created.id}/convert-to-project`);
+
+            expect(res.status).toBe(409);
+            expect(res.body.error).toBe('Los datos guardados del levantamiento no son válidos: corrígelos antes de convertirlo en proyecto');
+            expect(await count('projects')).toBe(0);
+        });
+    });
+
     describe('código correlativo (M4)', () => {
         it('el código de una cotización nueva no reutiliza el de una borrada', async () => {
             const first = await createQuote(lead);
@@ -502,15 +611,28 @@ describe('scopingRoutes API (SQLite real)', () => {
             expect(fourth.code).toMatch(/^COT-\d{4}-\d{3,}$/);
         });
 
-        it('los códigos nuevos tampoco chocan con códigos ya existentes de la lógica anterior', async () => {
+        it('dos creaciones consecutivas reciben códigos distintos derivados de su id', async () => {
             const first = await createQuote(lead);
-            const nextNumber = Number(first.code.split('-')[2]) + 1;
-            const year = first.code.split('-')[1];
-            await testDb.run('UPDATE scoping_quotations SET code = ? WHERE id = ?', [`COT-${year}-${String(nextNumber).padStart(3, '0')}`, first.id]);
+            const second = await createQuote(lead);
 
-            const created = await createQuote(lead);
+            expect(second.code).not.toBe(first.code);
+            for (const quote of [first, second]) {
+                expect(quote.code).toBe(`COT-${new Date().getFullYear()}-${String(quote.id).padStart(3, '0')}`);
+            }
+        });
 
-            expect(created.code).not.toBe(`COT-${year}-${String(nextNumber).padStart(3, '0')}`);
+        it('dos creaciones simultáneas reciben códigos distintos (sin carrera entre leer el correlativo e insertar)', async () => {
+            const [a, b, c] = await Promise.all([
+                call(lead, 'post', '/api/scopings', baseCreate),
+                call(lead, 'post', '/api/scopings', baseCreate),
+                call(dev, 'post', '/api/scopings', baseCreate)
+            ]);
+
+            expect([a.status, b.status, c.status]).toEqual([201, 201, 201]);
+            const codes = [a, b, c].map((res) => res.body.data.code);
+            expect(new Set(codes).size).toBe(3);
+            const stored = await testDb.query(`SELECT code FROM scoping_quotations WHERE code LIKE 'TMP-%'`);
+            expect(stored).toEqual([]);
         });
     });
 
@@ -527,6 +649,10 @@ describe('scopingRoutes API (SQLite real)', () => {
             const res = await convert(actor(), created.id);
 
             expect(res.status).toBe(403);
+            expect(res.body).toEqual({
+                success: false,
+                error: 'Solo el jefe de equipo u operaciones pueden convertir un levantamiento en proyecto'
+            });
             expect(await count('projects')).toBe(0);
             expect((await rowOf(created.id)).status).toBe('draft');
         });
@@ -644,6 +770,30 @@ describe('scopingRoutes API (SQLite real)', () => {
             expect(await count('projects')).toBe(1);
             expect(await count('task_boards')).toBe(1);
             expect(await count('task_columns')).toBe(5);
+        });
+
+        it('si otra conversión gana entre la verificación previa y el cierre, no queda proyecto huérfano y responde 409', async () => {
+            const created = await createQuote(lead);
+            const snapshot = (await call(lead, 'get', `/api/scopings/${created.id}`)).body.data;
+            // Otra conversión termina justo después de la verificación previa de esta (que aún ve un borrador)
+            await testDb.run(`UPDATE scoping_quotations SET status = 'converted_to_project' WHERE id = ?`, [created.id]);
+            const spy = jest.spyOn(ScopingService.prototype, 'getById').mockResolvedValueOnce(snapshot);
+
+            try {
+                const res = await convert(lead, created.id);
+
+                expect(res.status).toBe(409);
+                expect(res.body).toEqual({ success: false, error: 'Este levantamiento ya fue convertido a proyecto' });
+                expect(spy).toHaveBeenCalledTimes(1);
+            } finally {
+                spy.mockRestore();
+            }
+
+            for (const table of ['projects', 'task_boards', 'task_columns', 'tasks', 'project_phases', 'project_financials']) {
+                expect({ table, rows: await count(table) }).toEqual({ table, rows: 0 });
+            }
+            // La marca de la otra conversión no se pisó
+            expect(await rowOf(created.id)).toMatchObject({ status: 'converted_to_project', converted_project_id: null });
         });
 
         it('convertir dos veces responde 409 sin crear un segundo proyecto', async () => {
