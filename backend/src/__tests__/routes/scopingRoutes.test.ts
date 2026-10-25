@@ -759,7 +759,7 @@ describe('scopingRoutes API (SQLite real)', () => {
                 spy.mockRestore();
             }
 
-            for (const table of ['projects', 'task_boards', 'task_columns', 'tasks', 'project_phases', 'project_financials']) {
+            for (const table of ['projects', 'task_boards', 'task_columns', 'tasks', 'project_phases', 'project_financials', 'project_quotes']) {
                 expect({ table, rows: await count(table) }).toEqual({ table, rows: 0 });
             }
             expect(await rowOf(created.id)).toMatchObject({ status: 'draft', converted_project_id: null });
@@ -789,7 +789,7 @@ describe('scopingRoutes API (SQLite real)', () => {
                 spy.mockRestore();
             }
 
-            for (const table of ['projects', 'task_boards', 'task_columns', 'tasks', 'project_phases', 'project_financials']) {
+            for (const table of ['projects', 'task_boards', 'task_columns', 'tasks', 'project_phases', 'project_financials', 'project_quotes']) {
                 expect({ table, rows: await count(table) }).toEqual({ table, rows: 0 });
             }
             // La marca de la otra conversión no se pisó

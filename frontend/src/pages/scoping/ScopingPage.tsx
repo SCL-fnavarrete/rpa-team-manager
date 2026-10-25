@@ -259,7 +259,7 @@ export const ScopingPage: React.FC = () => {
     Modal.confirm({
       title: '¿Confirmar creación de Proyecto Formal?',
       icon: <CheckCircleOutlined style={{ color: token.colorSuccess }} />,
-      content: 'Se creará automáticamente el proyecto en el portafolio con su presupuesto, tablero Kanban y las 5 fases metodológicas de RPA asignadas como tareas.',
+      content: 'Se creará el proyecto en el portafolio, en etapa de cotización, con la versión 1 de la cotización lista para aprobar, su tablero Kanban y las 5 fases metodológicas de RPA asignadas como tareas.',
       okText: 'Crear Proyecto',
       cancelText: 'Cancelar',
       onOk: async () => {

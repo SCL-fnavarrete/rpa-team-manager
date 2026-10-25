@@ -468,6 +468,25 @@ export class ScopingService {
         [projectId, costClp, scoping.proposed_price, scoping.currency, scoping.total_hours]
       );
 
+      // Versión 1 de la cotización, ya enviada: el equipo solo la aprueba, sin reescribir monto, moneda ni horas.
+      // El costo va en la MISMA moneda que el monto: approveQuote lo convierte con la moneda de la versión.
+      await db.run(
+        `INSERT INTO project_quotes (
+          project_id, version, pricing_model, amount, currency, hours, estimated_cost, margin_percent,
+          status, notes, created_by
+        ) VALUES (?, 1, 'fixed', ?, ?, ?, ?, ?, 'sent', ?, ?)`,
+        [
+          projectId,
+          scoping.proposed_price,
+          scoping.currency,
+          scoping.total_hours,
+          scoping.project_internal_cost,
+          scoping.projected_margin_pct,
+          `Generada desde ${scoping.code}`,
+          actor.id
+        ]
+      );
+
       const board = await db.run(
         `INSERT INTO task_boards (project_id, name, description, board_type, is_default)
          VALUES (?, 'Tablero Principal RPA', 'Flujo de construcción y despliegue del robot', 'kanban', 1)`,

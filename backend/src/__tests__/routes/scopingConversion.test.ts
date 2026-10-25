@@ -105,6 +105,110 @@ describe('Conversión del cotizador a proyecto: cifras en pesos y versión 1 de 
 
     const scopingRow = (id: number) => testDb.get('SELECT * FROM scoping_quotations WHERE id = ?', [id]);
 
+    describe('el proyecto nace con la versión 1 de cotización', () => {
+        const quotesOf = async (projectId: number) => (await call(lead, 'get', `/api/commercial/projects/${projectId}/quotes`)).body.data;
+
+        it.each(['UF', 'USD', 'CLP'] as const)('la versión 1 enviada lleva monto, moneda, horas, costo y margen del levantamiento (%s)', async (currency) => {
+            const created = await createScoping(lead, currency);
+            const row = await scopingRow(created.id);
+
+            const projectId = await convert(ops, created.id);
+
+            const quotes = await quotesOf(projectId);
+            expect(quotes).toHaveLength(1);
+            expect(quotes[0]).toMatchObject({
+                version: 1,
+                status: 'sent',
+                pricing_model: 'fixed',
+                amount: row.proposed_price,
+                currency,
+                hours: row.total_hours,
+                // El costo va en la MISMA moneda que el monto: approveQuote lo convierte con la moneda de la versión
+                estimated_cost: row.project_internal_cost,
+                margin_percent: row.projected_margin_pct,
+                created_by: users.ops,
+                notes: `Generada desde ${created.code}`
+            });
+        });
+
+        it('quien no es team_lead no ve montos ni costos de la versión (igual que con las versiones manuales)', async () => {
+            const created = await createScoping(lead, 'UF');
+            const projectId = await convert(ops, created.id);
+
+            const res = await call(ops, 'get', `/api/commercial/projects/${projectId}/quotes`);
+
+            expect(res.status).toBe(200);
+            expect(res.body.data).toHaveLength(1);
+            for (const field of ['amount', 'estimated_cost', 'margin_percent']) {
+                expect(res.body.data[0]).not.toHaveProperty(field);
+            }
+        });
+
+        it.each(['UF', 'USD'] as const)('convertir → aprobar la versión 1 → OK del cliente deja finanzas y cartera coherentes en pesos (%s)', async (currency) => {
+            const created = await createScoping(lead, currency);
+            const row = await scopingRow(created.id);
+            const costClp = row.project_internal_cost * RATES[currency];
+            const priceClp = row.proposed_price * RATES[currency];
+            const projectId = await convert(ops, created.id);
+            const [quote] = await quotesOf(projectId);
+
+            const approved = await call(lead, 'post', `/api/commercial/quotes/${quote.id}/approve`);
+
+            expect(approved.status).toBe(200);
+            expect(await testDb.get('SELECT * FROM project_financials WHERE project_id = ?', [projectId])).toMatchObject({
+                budgeted_cost: costClp,
+                budgeted_cost_currency: 'CLP',
+                sale_price: row.proposed_price,
+                sale_price_currency: currency,
+                budgeted_hours: row.total_hours
+            });
+            const financials = await financeService.calculateProjectFinancials(projectId);
+            expect(financials).toMatchObject({
+                planned_cost: costClp,
+                sale_price: priceClp,
+                planned_hours: row.total_hours
+            });
+
+            const clientOk = await call(lead, 'post', `/api/commercial/projects/${projectId}/client-approval`, { approval_reference: 'OC-123' });
+            expect(clientOk.status).toBe(200);
+
+            const portfolio = (await call(lead, 'get', '/api/portfolio')).body.data;
+            const portfolioRow = portfolio.rows.find((r: any) => r.project_id === projectId);
+            expect(portfolioRow).toMatchObject({ sale_price: priceClp, projected_cost: costClp, real_cost: costClp });
+            expect(portfolio.totals).toMatchObject({ sale_price: priceClp, projected_cost: costClp });
+        });
+
+        it('el pipeline de la cartera muestra el monto de la versión 1 y no "Sin cotización"', async () => {
+            const created = await createScoping(lead, 'UF');
+            const row = await scopingRow(created.id);
+            const projectId = await convert(ops, created.id);
+
+            const portfolio = (await call(lead, 'get', '/api/portfolio')).body.data;
+
+            const entry = portfolio.pipeline.find((p: any) => p.project_id === projectId);
+            expect(entry).toMatchObject({
+                last_quote_version: 1,
+                last_quote_amount_clp: Math.round(row.proposed_price * RATES.UF)
+            });
+        });
+
+        it('"OK del cliente" ya no exige crear una versión a mano: basta aprobar la versión 1', async () => {
+            const created = await createScoping(lead, 'CLP');
+            const projectId = await convert(lead, created.id);
+
+            const before = await call(lead, 'post', `/api/commercial/projects/${projectId}/client-approval`, { approval_reference: 'OC-1' });
+            expect(before.status).toBe(409);
+            expect(before.body.error).toBe('Aprueba una versión de cotización antes de confirmar el proyecto');
+
+            const [quote] = await quotesOf(projectId);
+            await call(lead, 'post', `/api/commercial/quotes/${quote.id}/approve`);
+            const after = await call(lead, 'post', `/api/commercial/projects/${projectId}/client-approval`, { approval_reference: 'OC-1' });
+
+            expect(after.status).toBe(200);
+            expect(after.body.data.commercial_stage).toBe('approved');
+        });
+    });
+
     describe('el costo del proyecto se guarda en pesos (los demás módulos lo asumen así)', () => {
         it.each(['UF', 'USD', 'CLP'] as const)('convertir un levantamiento en %s guarda el costo presupuestado en CLP', async (currency) => {
             const created = await createScoping(lead, currency);
