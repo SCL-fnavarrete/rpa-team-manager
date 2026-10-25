@@ -8,6 +8,7 @@ import {
 } from './scopingCalculationEngine';
 import { RPA_ARCHETYPES, RPAArchetype } from '../constants/rpaArchetypes';
 import { activityLogService } from './activityLogService';
+import { financeService } from './financeService';
 import { UserRole } from '../types/auth';
 import { APIError, AuthorizationError, ConflictError } from '../utils/errors';
 import { logger } from '../utils/logger';
@@ -425,6 +426,10 @@ export class ScopingService {
       PHASE_TEMPLATE_NAMES
     ) as Array<{ id: number; name: string }>;
 
+    // El sistema entero asume costos en pesos (formulario del proyecto, aprobación de versiones, financeService):
+    // el costo interno del levantamiento viene en la moneda de la cotización y se convierte aquí.
+    const costClp = await financeService.toCLP(scoping.project_internal_cost, scoping.currency);
+
     const startDate = new Date();
     const endDate = addDays(startDate, scoping.estimated_weeks * 7 - 1);
     const projectDescription = `Proyecto RPA generado a partir del levantamiento ${scoping.code}.\n` +
@@ -446,7 +451,7 @@ export class ScopingService {
         [
           `RPA - ${scoping.process_name} (${scoping.client_name})`,
           projectDescription,
-          scoping.project_internal_cost,
+          costClp,
           toDateOnly(startDate),
           toDateOnly(endDate),
           actor.id,
@@ -459,8 +464,8 @@ export class ScopingService {
       await db.run(
         `INSERT INTO project_financials (
           project_id, budgeted_cost, budgeted_cost_currency, sale_price, sale_price_currency, budgeted_hours
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
-        [projectId, scoping.project_internal_cost, scoping.currency, scoping.proposed_price, scoping.currency, scoping.total_hours]
+        ) VALUES (?, ?, 'CLP', ?, ?, ?)`,
+        [projectId, costClp, scoping.proposed_price, scoping.currency, scoping.total_hours]
       );
 
       const board = await db.run(

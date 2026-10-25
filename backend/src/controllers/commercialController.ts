@@ -153,8 +153,10 @@ export class CommercialController {
       const financials = await db.get('SELECT id FROM project_financials WHERE project_id = ?', [quote.project_id]);
       const costCLP = quote.estimated_cost == null ? 0 : await financeService.toCLP(Number(quote.estimated_cost), quote.currency as Currency);
       const updates = { sale_price: quote.amount, sale_price_currency: quote.currency, budgeted_hours: quote.hours ?? 0, budgeted_cost: costCLP };
-      if (financials) await db.run(`UPDATE project_financials SET sale_price = ?, sale_price_currency = ?, budgeted_hours = ?, budgeted_cost = ?, updated_at = datetime('now') WHERE project_id = ?`, [updates.sale_price, updates.sale_price_currency, updates.budgeted_hours, updates.budgeted_cost, quote.project_id]);
-      else await db.run(`INSERT INTO project_financials (project_id, sale_price, sale_price_currency, budgeted_hours, budgeted_cost) VALUES (?, ?, ?, ?, ?)`, [quote.project_id, updates.sale_price, updates.sale_price_currency, updates.budgeted_hours, updates.budgeted_cost]);
+      // El costo se guarda ya convertido a pesos, así que la columna de su moneda debe decir CLP: si conservara
+      // 'UF'/'USD' (p. ej. de una versión anterior) financeService lo convertiría por segunda vez.
+      if (financials) await db.run(`UPDATE project_financials SET sale_price = ?, sale_price_currency = ?, budgeted_hours = ?, budgeted_cost = ?, budgeted_cost_currency = 'CLP', updated_at = datetime('now') WHERE project_id = ?`, [updates.sale_price, updates.sale_price_currency, updates.budgeted_hours, updates.budgeted_cost, quote.project_id]);
+      else await db.run(`INSERT INTO project_financials (project_id, sale_price, sale_price_currency, budgeted_hours, budgeted_cost, budgeted_cost_currency) VALUES (?, ?, ?, ?, ?, 'CLP')`, [quote.project_id, updates.sale_price, updates.sale_price_currency, updates.budgeted_hours, updates.budgeted_cost]);
       await db.commit();
     } catch (error) { await db.rollback(); throw error; }
     await activityLogService.logActivity(userId, 'quote', quoteId, 'internally_approved', { status: quote.status }, { status: 'approved', approved_by: userId, approved_at: new Date().toISOString() });
