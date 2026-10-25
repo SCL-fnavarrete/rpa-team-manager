@@ -776,7 +776,11 @@ describe('scopingRoutes API (SQLite real)', () => {
             const created = await createQuote(lead);
             const snapshot = (await call(lead, 'get', `/api/scopings/${created.id}`)).body.data;
             // Otra conversión termina justo después de la verificación previa de esta (que aún ve un borrador)
-            await testDb.run(`UPDATE scoping_quotations SET status = 'converted_to_project' WHERE id = ?`, [created.id]);
+            const otherProject = await testDb.run(`INSERT INTO projects (name, created_by) VALUES ('Proyecto de la otra conversión', ?)`, [users.lead]);
+            await testDb.run(
+                `UPDATE scoping_quotations SET status = 'converted_to_project', converted_project_id = ? WHERE id = ?`,
+                [otherProject.id, created.id]
+            );
             const spy = jest.spyOn(ScopingService.prototype, 'getById').mockResolvedValueOnce(snapshot);
 
             try {
@@ -789,11 +793,52 @@ describe('scopingRoutes API (SQLite real)', () => {
                 spy.mockRestore();
             }
 
-            for (const table of ['projects', 'task_boards', 'task_columns', 'tasks', 'project_phases', 'project_financials', 'project_quotes']) {
+            // Solo queda el proyecto de la otra conversión: la de esta no dejó nada a medias
+            expect(await count('projects')).toBe(1);
+            for (const table of ['task_boards', 'task_columns', 'tasks', 'project_phases', 'project_financials', 'project_quotes']) {
                 expect({ table, rows: await count(table) }).toEqual({ table, rows: 0 });
             }
             // La marca de la otra conversión no se pisó
-            expect(await rowOf(created.id)).toMatchObject({ status: 'converted_to_project', converted_project_id: null });
+            expect(await rowOf(created.id)).toMatchObject({ status: 'converted_to_project', converted_project_id: otherProject.id });
+        });
+
+        describe('levantamiento atascado: su proyecto convertido se borró', () => {
+            // ON DELETE SET NULL deja converted_project_id vacío pero el estado sigue "convertida a proyecto"
+            const stuckQuote = async () => {
+                const created = await createQuote(lead);
+                const converted = await convert(lead, created.id);
+                await testDb.run('DELETE FROM projects WHERE id = ?', [converted.body.data.project_id]);
+                expect(await rowOf(created.id)).toMatchObject({ status: 'converted_to_project', converted_project_id: null });
+                return created;
+            };
+
+            it('se puede editar y, al guardar, vuelve a su estado normal (borrador)', async () => {
+                const created = await stuckQuote();
+
+                const res = await call(lead, 'put', `/api/scopings/${created.id}`, { client_name: 'Cliente corregido' });
+
+                expect(res.status).toBe(200);
+                expect(res.body.data).toMatchObject({ client_name: 'Cliente corregido', status: 'draft', converted_project_id: null });
+            });
+
+            it('se puede convertir de nuevo y queda enlazado al proyecto nuevo', async () => {
+                const created = await stuckQuote();
+
+                const res = await convert(lead, created.id);
+
+                expect(res.status).toBe(200);
+                expect(await rowOf(created.id)).toMatchObject({ status: 'converted_to_project', converted_project_id: res.body.data.project_id });
+                expect(await count('projects')).toBe(1);
+            });
+
+            it('no se puede forzar el estado "convertida" por PUT al repararlo', async () => {
+                const created = await stuckQuote();
+
+                const res = await call(lead, 'put', `/api/scopings/${created.id}`, { status: 'converted_to_project' });
+
+                expect(res.status).toBe(409);
+                expect(res.body.error).toBe('El estado "convertida a proyecto" solo se asigna al convertir el levantamiento en proyecto');
+            });
         });
 
         it('convertir dos veces responde 409 sin crear un segundo proyecto', async () => {

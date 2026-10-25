@@ -105,6 +105,20 @@ describe('Conversión del cotizador a proyecto: cifras en pesos y versión 1 de 
 
     const scopingRow = (id: number) => testDb.get('SELECT * FROM scoping_quotations WHERE id = ?', [id]);
 
+    it('la descripción del proyecto no incluye el precio ni el costo (la ven todos los miembros y rpa_operations)', async () => {
+        const created = await createScoping(lead, 'UF');
+        const row = await scopingRow(created.id);
+
+        const projectId = await convert(ops, created.id);
+
+        const { description } = await testDb.get('SELECT description FROM projects WHERE id = ?', [projectId]);
+        expect(description).toContain(created.code);
+        expect(description).toContain('Esfuerzo estimado');
+        expect(description).not.toMatch(/precio|costo/i);
+        expect(description).not.toContain(String(row.proposed_price));
+        expect(description).not.toContain(String(row.project_internal_cost));
+    });
+
     describe('el proyecto nace con la versión 1 de cotización', () => {
         const quotesOf = async (projectId: number) => (await call(lead, 'get', `/api/commercial/projects/${projectId}/quotes`)).body.data;
 

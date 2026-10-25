@@ -164,6 +164,11 @@ function parseCustomHours(raw: string | null | undefined): CustomHours | null {
   }
 }
 
+// ¿Ya tiene proyecto? El estado "convertida" no basta: si el proyecto se borró, converted_project_id queda NULL
+// (ON DELETE SET NULL) y el levantamiento vuelve a poder editarse y convertirse.
+const hasProject = (record: Pick<ScopingRecord, 'converted_project_id'>): boolean =>
+  record.converted_project_id !== null && record.converted_project_id !== undefined;
+
 const notFound = (): APIError => new APIError('Levantamiento no encontrado', 404, 'NOT_FOUND_ERROR');
 
 const addDays = (date: Date, days: number): Date => {
@@ -358,10 +363,12 @@ export class ScopingService {
    * guardado (incluida la calibración manual de horas) y el resultado se recalcula con las entradas fusionadas.
    */
   public async update(id: number, data: Record<string, any>, actor: ScopingActor): Promise<ScopingRecord> {
-    const existing = await this.requireModifiable(id, actor);
-    if (existing.status === 'converted_to_project') {
+    const stored = await this.requireModifiable(id, actor);
+    if (hasProject(stored)) {
       throw new ConflictError('No se puede modificar un levantamiento que ya fue convertido a proyecto');
     }
+    // Convertido cuyo proyecto se borró: al guardar vuelve a su estado normal (borrador)
+    const existing: ScopingRecord = stored.status === 'converted_to_project' ? { ...stored, status: 'draft' } : stored;
 
     const resolved = this.resolveFields(data, actor, existing);
     this.assertStatusAssignable(resolved.details.status, existing.status);
@@ -400,12 +407,9 @@ export class ScopingService {
     const scoping = await this.getById(id);
     if (!scoping) throw notFound();
 
-    if (scoping.status === 'converted_to_project' || scoping.converted_project_id) {
-      throw new ConflictError(
-        scoping.converted_project_id
-          ? `Este levantamiento ya fue convertido al proyecto ID ${scoping.converted_project_id}`
-          : 'Este levantamiento ya fue convertido a proyecto'
-      );
+    // Con estado "convertida" pero sin proyecto (se borró) se puede convertir de nuevo
+    if (hasProject(scoping)) {
+      throw new ConflictError(`Este levantamiento ya fue convertido al proyecto ID ${scoping.converted_project_id}`);
     }
 
     const calc = scoping.calculation;
@@ -435,8 +439,7 @@ export class ScopingService {
     const projectDescription = `Proyecto RPA generado a partir del levantamiento ${scoping.code}.\n` +
       `Cliente: ${scoping.client_name}\n` +
       `Proceso: ${scoping.process_name}\n` +
-      `Esfuerzo estimado: ${calc.effort_label} (${scoping.total_hours} HH en ${scoping.estimated_weeks} semanas)\n` +
-      `Precio propuesto: ${scoping.currency} ${scoping.proposed_price.toLocaleString('es-CL')}`;
+      `Esfuerzo estimado: ${calc.effort_label} (${scoping.total_hours} HH en ${scoping.estimated_weeks} semanas)`;
 
     await db.beginTransaction('IMMEDIATE');
     let projectId: number;
@@ -545,7 +548,7 @@ export class ScopingService {
       const marked = await db.run(
         `UPDATE scoping_quotations
          SET status = 'converted_to_project', converted_project_id = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ? AND converted_project_id IS NULL AND status <> 'converted_to_project'`,
+         WHERE id = ? AND converted_project_id IS NULL`,
         [projectId, id]
       );
       if (!marked.changes) {
