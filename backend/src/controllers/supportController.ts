@@ -5,6 +5,18 @@ import { logger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
 import multer from 'multer';
 import fs from 'fs';
+import { selectWritableColumns } from '../utils/columnWhitelist';
+
+/**
+ * Columnas de support_tickets que un cliente puede escribir con PUT /support/tickets/:id. id, id_ticket,
+ * created_by, created_at, resolved_at y updated_at las fija el servidor; id_ticket es la clave de la ruta y se
+ * descarta sin error porque el formulario la envía junto al resto.
+ */
+const SUPPORT_TICKET_UPDATABLE_COLUMNS = [
+    'company_id', 'title', 'description', 'priority', 'status', 'ticket_type', 'resolver_id', 'hours_spent',
+    'attention_method', 'rpa_process_id', 'contact_id', 'work_date', 'completion_date'
+] as const;
+const SUPPORT_TICKET_IGNORED_KEYS = ['id_ticket'] as const;
 
 export class SupportController {
 
@@ -624,11 +636,18 @@ export class SupportController {
     updateSupportTicket = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
         try {
             const { id } = req.params;
-            const updates = req.body;
+
+            // Los nombres de columna salen siempre de la lista blanca, nunca de las claves que envía el cliente
+            const selection = selectWritableColumns(req.body, SUPPORT_TICKET_UPDATABLE_COLUMNS, SUPPORT_TICKET_IGNORED_KEYS);
+            if ('error' in selection) {
+                res.status(400).json({ error: selection.error });
+                return;
+            }
+            const { columns, values } = selection;
 
             // Check if ticket exists
             const existingTicket = await db.get(
-                'SELECT * FROM support_tickets WHERE id_ticket = ?', 
+                'SELECT * FROM support_tickets WHERE id_ticket = ?',
                 [id]
             );
 
@@ -637,35 +656,26 @@ export class SupportController {
                 return;
             }
 
-            // Build update query dynamically
-            const fields = [];
-            const values = [];
-            
-            for (const [key, value] of Object.entries(updates)) {
-                if (value !== undefined && key !== 'id_ticket') {
-                    fields.push(`${key} = ?`);
-                    values.push(value);
-                }
-            }
-
-            if (fields.length === 0) {
-                res.status(400).json({ error: 'No fields to update' });
+            if (columns.length === 0) {
+                res.status(400).json({ error: 'No hay campos para actualizar' });
                 return;
             }
 
+            const fields = columns.map(column => `${column} = ?`);
+
             // Auto-set resolved_at if status is resolved or closed
-            if (updates.status && ['resolved', 'closed'].includes(updates.status)) {
+            const status = values[columns.indexOf('status')];
+            if (status && ['resolved', 'closed'].includes(String(status))) {
                 fields.push('resolved_at = datetime(\'now\')');
             }
 
             fields.push('updated_at = datetime(\'now\')');
-            values.push(id);
 
             await db.run(`
-                UPDATE support_tickets 
-                SET ${fields.join(', ')} 
+                UPDATE support_tickets
+                SET ${fields.join(', ')}
                 WHERE id_ticket = ?
-            `, values);
+            `, [...values, id]);
 
             // Get updated ticket
             const updatedTicket = await db.get(`

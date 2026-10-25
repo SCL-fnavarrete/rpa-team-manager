@@ -6,6 +6,7 @@ import { financeService, Currency, ProjectFinancials } from '../services/finance
 import { billingService } from '../services/billingService';
 import { timesheetService } from '../services/timesheetService';
 import { isRealizedSale, portfolioService } from '../services/portfolioService';
+import { isPlainObject, selectWritableColumns } from '../utils/columnWhitelist';
 
 interface AuthenticatedRequest extends Request {
     user?: {
@@ -74,6 +75,23 @@ export const PMO_METRICS_COLUMNS = [
     'risk_level', 'risk_factors', 'bugs_found', 'bugs_resolved', 'client_satisfaction_score', 'team_velocity'
 ] as const;
 
+/**
+ * Columnas de project_milestones que un cliente puede escribir con PUT /pmo/milestones/:id: las que envía el
+ * formulario de edición del Gantt (PMODashboard, único llamador), más las de createMilestone y las del ejemplo de
+ * docs/pmo-api.md (completion_percentage). project_id, created_by, created_at, updated_at y baseline_planned_date
+ * las fija el servidor.
+ */
+const MILESTONE_UPDATABLE_COLUMNS = [
+    'name', 'description', 'milestone_type', 'planned_date', 'end_date', 'actual_date', 'status', 'priority',
+    'responsible_user_id', 'completion_percentage', 'impact_on_timeline', 'responsibility', 'blocking_reason',
+    'delay_justification', 'external_contact', 'estimated_delay_days', 'financial_impact'
+] as const;
+
+// Un cliente puede devolver el hito completo: estas claves del servidor se descartan sin error, como ya hacía la ruta
+const MILESTONE_IGNORED_KEYS = ['id', 'created_by', 'created_at'] as const;
+
+const MILESTONE_RESPONSE_KEYS = ['id', 'project_id', ...MILESTONE_UPDATABLE_COLUMNS, 'responsible_name', 'project_name'] as const;
+
 const PMO_METRICS_SELECT = `SELECT id, project_id, ${PMO_METRICS_COLUMNS.join(', ')}, last_updated, updated_by
                 FROM project_pmo_metrics WHERE project_id = ?`;
 
@@ -88,10 +106,6 @@ const BUDGET_COST_KEYS = new Set([
     'budget_planned', 'budget_spent', 'budgetAnalysis', 'on_budget_projects', 'total_budget_managed', 'avg_budget_variance',
     'on_budget_deliveries', 'on_budget_rate'
 ]);
-
-// toString y no getPrototypeOf: las filas del driver sqlite3 vienen de otro contexto de ejecución (Jest) y su prototipo no es el nuestro
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-    Object.prototype.toString.call(value) === '[object Object]';
 
 const withoutBudgetKeys = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(withoutBudgetKeys);
@@ -516,19 +530,28 @@ export class PMOController {
     updateMilestone = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
         try {
             const { id } = req.params;
-            const updates = req.body;
 
-            const existing = await db.get(`SELECT * FROM project_milestones WHERE id = ?`, [id]);
-            if (!existing) {
-                res.status(404).json({ error: 'Milestone not found' });
+            // Los nombres de columna salen siempre de la lista blanca, nunca de las claves que envía el cliente
+            const selection = selectWritableColumns(req.body, MILESTONE_UPDATABLE_COLUMNS, MILESTONE_IGNORED_KEYS);
+            if ('error' in selection) {
+                res.status(400).json({ error: selection.error });
+                return;
+            }
+            const { columns } = selection;
+            if (columns.length === 0) {
+                res.status(400).json({ error: 'No hay campos para actualizar' });
                 return;
             }
 
-            // Remove fields that shouldn't be updated directly
-            delete updates.id;
-            delete updates.created_by;
-            delete updates.created_at;
-            
+            const existing = await db.get(`SELECT * FROM project_milestones WHERE id = ?`, [id]);
+            if (!existing) {
+                res.status(404).json({ error: 'Hito no encontrado' });
+                return;
+            }
+
+            const updates: Record<string, unknown> = {};
+            columns.forEach((column, index) => { updates[column] = selection.values[index]; });
+
             // Map frontend responsibility values to database values
             console.log('🔍 Original responsibility value:', updates.responsibility);
             if (updates.responsibility === 'cliente' || updates.responsibility === 'client') {
@@ -544,27 +567,14 @@ export class PMOController {
                 console.log('⚠️ Unmapped responsibility value:', updates.responsibility);
             }
 
-            const fields = [];
-            const values = [];
-
-            for (const [key, value] of Object.entries(updates)) {
-                fields.push(`${key} = ?`);
-                values.push(value);
-            }
-
-            if (fields.length === 0) {
-                res.status(400).json({ error: 'No fields to update' });
-                return;
-            }
-
+            const fields = columns.map(column => `${column} = ?`);
             fields.push('updated_at = datetime(\'now\')');
-            values.push(id);
 
             await db.run(`
-                UPDATE project_milestones 
-                SET ${fields.join(', ')} 
+                UPDATE project_milestones
+                SET ${fields.join(', ')}
                 WHERE id = ?
-            `, values);
+            `, [...columns.map(column => updates[column]), id]);
 
             const updatedMilestone = await db.get(`
                 SELECT m.*, u.full_name as responsible_name, p.name as project_name
@@ -589,10 +599,11 @@ export class PMOController {
             }
 
             logger.info(`Milestone updated: ${id}`);
-            res.json(updatedMilestone);
+            // Solo columnas explícitas: nada de lo que posee el servidor (created_by, created_at, updated_at, línea base)
+            res.json(Object.fromEntries(MILESTONE_RESPONSE_KEYS.map(key => [key, updatedMilestone[key]])));
         } catch (error) {
             logger.error('Update milestone error:', error);
-            res.status(500).json({ error: 'Failed to update milestone' });
+            res.status(500).json({ error: 'No se pudo actualizar el hito' });
         }
     };
 
@@ -871,23 +882,18 @@ export class PMOController {
     updateProjectMetrics = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
         try {
             const { id } = req.params;
-            const body: unknown = req.body;
-
-            if (!isPlainObject(body)) {
-                res.status(400).json({ error: 'El cuerpo debe ser un objeto con las métricas a guardar' });
-                return;
-            }
-
-            const allowed = new Set<string>(PMO_METRICS_COLUMNS);
-            const notAllowed = Object.keys(body).filter(key => !allowed.has(key));
-            if (notAllowed.length > 0) {
-                res.status(400).json({ error: `Campos de métricas no permitidos: ${notAllowed.join(', ')}` });
-                return;
-            }
 
             // Los nombres de columna salen siempre de la lista blanca, nunca de las claves que envía el cliente
-            const columns = PMO_METRICS_COLUMNS.filter(column => Object.prototype.hasOwnProperty.call(body, column));
-            const values = columns.map(column => body[column]);
+            const selection = selectWritableColumns(req.body, PMO_METRICS_COLUMNS);
+            if ('error' in selection) {
+                res.status(400).json({ error: selection.error });
+                return;
+            }
+            const { columns, values } = selection;
+            if (columns.length === 0) {
+                res.status(400).json({ error: 'No hay campos para actualizar' });
+                return;
+            }
 
             // Check if metrics exist for this project
             const existing = await db.get('SELECT id FROM project_pmo_metrics WHERE project_id = ?', [id]);
@@ -917,7 +923,7 @@ export class PMOController {
             res.json(stripBudgetFields(updatedMetrics, req.user?.role));
         } catch (error) {
             logger.error('Update project metrics error:', error);
-            res.status(500).json({ error: 'Failed to update project metrics' });
+            res.status(500).json({ error: 'No se pudieron actualizar las métricas del proyecto' });
         }
     };
 

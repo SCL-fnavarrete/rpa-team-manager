@@ -511,6 +511,11 @@ Content-Type: application/json
 }
 ```
 
+**Notes:**
+- Only these columns are accepted: `name`, `description`, `milestone_type`, `planned_date`, `end_date`, `actual_date`, `status`, `priority`, `responsible_user_id`, `completion_percentage`, `impact_on_timeline`, `responsibility`, `blocking_reason`, `delay_justification`, `external_contact`, `estimated_delay_days`, `financial_impact`. Values must be text, number, boolean or null.
+- Any other key, a nested object or array as a value, or a body without any valid field returns `400` with a Spanish `error` message and nothing is written. `id`, `created_by` and `created_at` are silently ignored so a client can send the whole milestone back.
+- The response lists explicit columns (`id`, `project_id`, the accepted columns, `responsible_name`, `project_name`); server-owned fields such as `created_by`, `created_at`, `updated_at` and `baseline_planned_date` are not returned.
+
 ### DELETE /milestones/:id
 
 Deletes a milestone.
@@ -583,7 +588,7 @@ Content-Type: application/json
 
 **Notes:**
 - Only these columns are accepted: `planned_hours`, `planned_start_date`, `planned_end_date`, `planned_budget`, `actual_hours`, `actual_start_date`, `actual_end_date`, `actual_cost`, `completion_percentage`, `completed_tasks`, `total_tasks`, `schedule_variance_days`, `cost_variance_percentage`, `scope_variance_percentage`, `risk_level`, `risk_factors`, `bugs_found`, `bugs_resolved`, `client_satisfaction_score`, `team_velocity`.
-- Any other key (including `id`, `project_id`, `last_updated`, `updated_by`) or a body that is not a JSON object returns `400` with `{ "error": "Campos de métricas no permitidos: ..." }` and nothing is written.
+- Any other key (including `id`, `project_id`, `last_updated`, `updated_by`), a nested object or array as a value, a body that is not a JSON object, or a body without any field returns `400` with a Spanish `error` message (for example `{ "error": "Campos no permitidos: ..." }`) and nothing is written.
 - `rpa_operations` can write `planned_budget`, `actual_cost` and `cost_variance_percentage`, but the response omits them (see Budget and cost visibility).
 
 ---

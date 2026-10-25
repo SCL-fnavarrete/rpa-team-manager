@@ -19,11 +19,14 @@ jest.mock('../../middleware/auth', () => {
 import express from 'express';
 import request from 'supertest';
 import pmoRoutes from '../../routes/pmoRoutes';
+import { sanitizeInput } from '../../middleware/validation';
 import { PMO_METRICS_COLUMNS } from '../../controllers/pmoController';
 import { createRealTestDb, realDbHolder, seedBasicUsers, RealTestDb } from '../helpers/realTestDb';
 
+// Mismo orden que en producción (server.ts): primero el parser JSON y después sanitizeInput, que reconstruye el cuerpo.
 const app = express();
 app.use(express.json());
+app.use(sanitizeInput);
 app.use('/api/pmo', pmoRoutes);
 
 // Columnas que el servidor controla: ningún cliente puede escribirlas.
@@ -51,8 +54,10 @@ describe('POST /api/pmo/projects/:id/metrics - lista blanca de columnas (SQLite 
         projectId = (await testDb.run(`INSERT INTO projects (name, status) VALUES ('Alfa', 'active')`)).id!;
     });
 
-    const postMetrics = (role: string, body: unknown, id: number = projectId) =>
-        request(app).post(`/api/pmo/projects/${id}/metrics`).set('x-test-role', role).send(body as object);
+    const postMetrics = (role: string, body: string | object, id: number = projectId) => {
+        const req = request(app).post(`/api/pmo/projects/${id}/metrics`).set('x-test-role', role);
+        return typeof body === 'string' ? req.set('Content-Type', 'application/json').send(body) : req.send(body);
+    };
 
     const metricsRows = () => testDb.query(`SELECT * FROM project_pmo_metrics ORDER BY id`);
     const userNames = async () => (await testDb.query(`SELECT username FROM users ORDER BY id`)).map((u: any) => u.username);
@@ -73,7 +78,15 @@ describe('POST /api/pmo/projects/:id/metrics - lista blanca de columnas (SQLite 
         ['la clave primaria', { id: 99 }],
         ['project_id', { project_id: 99 }],
         ['una columna que controla el servidor', { last_updated: '2000-01-01', updated_by: 99 }],
-        ['una clave válida mezclada con una maliciosa', { completion_percentage: 80, 'risk_level = \'critical\', planned_budget': 0 }]
+        ['una clave válida mezclada con una maliciosa', { completion_percentage: 80, 'risk_level = \'critical\', planned_budget': 0 }],
+        ['__proto__ con un objeto', '{"__proto__": {"planned_budget": 0, "actual_cost": 0}}'],
+        ['__proto__ con un texto', '{"__proto__": "x"}'],
+        ['constructor con un objeto anidado', '{"constructor": {"prototype": {"planned_budget": 0}}}'],
+        ['una columna con mayúsculas', '{"PLANNED_BUDGET": 0}'],
+        ['una columna con espacios', '{" planned_budget ": 0}'],
+        ['una clave que contiene una columna válida dentro de un objeto', '{"datos": {"planned_budget": 0}}'],
+        ['un valor objeto en una columna válida', '{"planned_budget": {"$gt": 0}}'],
+        ['un valor arreglo en una columna válida', '{"risk_factors": ["a", "b"]}']
     ])('responde 400 en español y no toca la base ante %s', async (_nombre, body) => {
         await seedMetrics();
         const before = await metricsRows();
@@ -82,7 +95,7 @@ describe('POST /api/pmo/projects/:id/metrics - lista blanca de columnas (SQLite 
         const res = await postMetrics('team_lead', body);
 
         expect(res.status).toBe(400);
-        expect(res.body.error).toMatch(/no permitid/i);
+        expect(res.body.error).toMatch(/no permitid|no hay campos|no válido/i);
         expect(Object.keys(res.body)).toEqual(['error']);
         expect(await metricsRows()).toEqual(before);
         expect(await userNames()).toEqual(usersBefore);
@@ -141,13 +154,22 @@ describe('POST /api/pmo/projects/:id/metrics - lista blanca de columnas (SQLite 
         expect(await metricsRows()).toHaveLength(1);
     });
 
-    it('un cuerpo vacío no cambia las métricas y responde con la fila actual', async () => {
+    it('un cuerpo sin ningún campo responde 400 y no escribe nada, ni siquiera last_updated', async () => {
         await seedMetrics();
+        const before = await metricsRows();
 
         const res = await postMetrics('team_lead', {});
 
-        expect(res.status).toBe(200);
-        expect(res.body).toMatchObject({ project_id: projectId, completion_percentage: 10, planned_budget: 1000 });
+        expect(res.status).toBe(400);
+        expect(res.body).toEqual({ error: 'No hay campos para actualizar' });
+        expect(await metricsRows()).toEqual(before);
+    });
+
+    it('un valor que viola una restricción de la base responde 500 con un mensaje en español y sin detalles internos', async () => {
+        const res = await postMetrics('team_lead', { risk_level: 'riesgo_inventado' });
+
+        expect(res.status).toBe(500);
+        expect(res.body).toEqual({ error: 'No se pudieron actualizar las métricas del proyecto' });
     });
 
     it('rpa_operations puede guardar presupuesto y costo, pero la respuesta no los devuelve', async () => {
