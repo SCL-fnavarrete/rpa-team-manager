@@ -745,6 +745,18 @@ describe('ScopingPage', () => {
       expect(within(dialog).getByText(/Convertir en Proyecto/).closest('button')).toBeDisabled();
     });
 
+    it('la propuesta de una fila "convertida" cuyo proyecto fue borrado sí ofrece convertir de nuevo', async () => {
+      mocked.getById.mockResolvedValue(makeRecord({ status: 'converted_to_project', converted_project_id: null }));
+      renderPage();
+      await waitForPanel();
+      await openTab(/Historial de Cotizaciones/);
+      const row = (await screen.findByText('COT-2026-007')).closest('tr') as HTMLElement;
+      await user.click(within(row).getByLabelText('eye'));
+
+      const dialog = await proposalDialog();
+      expect(within(dialog).getByText(/Convertir en Proyecto/).closest('button')).toBeEnabled();
+    });
+
     it('la propuesta de una cotización ya convertida no ofrece convertirla otra vez', async () => {
       mocked.getById.mockResolvedValue(makeRecord({ status: 'converted_to_project', converted_project_id: 12 }));
       renderPage();

@@ -37,7 +37,8 @@ import {
   canDeleteScoping,
   canModifyScoping,
   canSeeInternalCosts,
-  isConvertibleRecord
+  isConvertibleRecord,
+  isLinkedToProject
 } from '../../utils/scopingPermissions';
 
 const { Text } = Typography;
@@ -124,7 +125,8 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
     }
   };
 
-  const statusTag = (st: string) => {
+  const statusTag = (record: ScopingQuotationRecord) => {
+    const st = record.status;
     switch (st) {
       case 'draft':
         return <Tag color="default">Borrador</Tag>;
@@ -135,7 +137,10 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
       case 'rejected':
         return <Tag color="magenta">Rechazada</Tag>;
       case 'converted_to_project':
-        return <Tag color="purple" icon={<RocketOutlined />}>Convertida a Proyecto</Tag>;
+        // Sin proyecto asociado es que lo eliminaron: la fila sigue editable y convertible
+        return isLinkedToProject(record)
+          ? <Tag color="purple" icon={<RocketOutlined />}>Convertida a Proyecto</Tag>
+          : <Tag color="default" icon={<RocketOutlined />}>Convertida (proyecto eliminado)</Tag>;
       default:
         return <Tag>{st}</Tag>;
     }
@@ -217,7 +222,7 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
       dataIndex: 'status',
       key: 'status',
       width: 160,
-      render: (st: string) => statusTag(st)
+      render: (_: string, record: ScopingQuotationRecord) => statusTag(record)
     },
     {
       title: 'Acciones',
@@ -225,7 +230,7 @@ export const ScopingListTable: React.FC<ScopingListTableProps> = ({
       width: 150,
       align: 'right' as const,
       render: (_: any, record: ScopingQuotationRecord) => {
-        const isConverted = record.status === 'converted_to_project';
+        const isConverted = isLinkedToProject(record);
         return (
           <Space size={4}>
             <Tooltip title="Ver Propuesta Técnico-Económica">

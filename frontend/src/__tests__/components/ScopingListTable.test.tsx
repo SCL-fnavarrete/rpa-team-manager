@@ -125,6 +125,45 @@ describe('ScopingListTable', () => {
       expect(within(row).queryByLabelText('delete')).toBeNull();
       // Solo queda el cohete de la etiqueta de estado, no un botón
       expect(within(row).queryAllByLabelText('rocket').filter((icon) => icon.closest('button'))).toHaveLength(0);
+      expect(within(row).getByText('Convertida a Proyecto')).toBeInTheDocument();
+    });
+
+    it('una fila "convertida" cuyo proyecto fue borrado (sin converted_project_id) ofrece editar y convertir de nuevo', () => {
+      renderTable(
+        [makeRecord({ status: 'converted_to_project', converted_project_id: null, created_by: 5 })],
+        { currentUser: operations }
+      );
+
+      const row = rowOf('COT-2026-007');
+      expect(within(row).getByText('Convertida (proyecto eliminado)')).toBeInTheDocument();
+      expect(within(row).queryByText('Convertida a Proyecto')).toBeNull();
+      // rpa_operations convierte por rol; editar solo si es autor o team_lead (aquí no lo es)
+      const convert = within(row).queryAllByLabelText('rocket').find((icon) => icon.closest('button'));
+      expect(convert?.closest('button')).toBeEnabled();
+      expect(within(row).queryByLabelText('edit')).toBeNull();
+    });
+
+    it('la fila atascada respeta los permisos de siempre: team_lead edita y convierte, rpa_developer no convierte', () => {
+      const stuck = makeRecord({ status: 'converted_to_project', converted_project_id: null, created_by: 5 });
+
+      const leadView = renderTable([stuck], { currentUser: lead });
+      expect(within(rowOf('COT-2026-007')).queryByLabelText('edit')).not.toBeNull();
+      expect(within(rowOf('COT-2026-007')).queryAllByLabelText('rocket').filter((icon) => icon.closest('button'))).toHaveLength(1);
+      leadView.unmount();
+
+      renderTable([stuck], { currentUser: developer });
+      expect(within(rowOf('COT-2026-007')).queryByLabelText('edit')).not.toBeNull();
+      expect(within(rowOf('COT-2026-007')).queryAllByLabelText('rocket').filter((icon) => icon.closest('button'))).toHaveLength(0);
+    });
+
+    it('la fila atascada con un proceso no viable deja Convertir deshabilitado', () => {
+      renderTable(
+        [makeRecord({ status: 'converted_to_project', converted_project_id: null, viability_status: 'not_viable' })],
+        { currentUser: lead }
+      );
+
+      const convert = within(rowOf('COT-2026-007')).queryAllByLabelText('rocket').find((icon) => icon.closest('button'));
+      expect(convert?.closest('button')).toBeDisabled();
     });
   });
 

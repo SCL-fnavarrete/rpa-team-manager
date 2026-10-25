@@ -12,6 +12,7 @@ interface ScopingRecordLike {
   created_by?: number | null;
   status?: string;
   viability_status?: string;
+  converted_project_id?: number | null;
 }
 
 type MaybeActor = ScopingActor | null | undefined;
@@ -34,6 +35,10 @@ export const canModifyScoping = (user: MaybeActor, record: ScopingRecordLike): b
 export const canDeleteScoping = (user: MaybeActor, record: ScopingRecordLike): boolean =>
   canModifyScoping(user, record) && record.status === 'draft';
 
-// El backend responde 409 si ya se convirtió o si no es exactamente "viable"
+// Ligada a un proyecto existente. Lo decide `converted_project_id`, no el estado: si borran el proyecto la fila queda
+// en `converted_to_project` con el id NULL y el backend permite editarla y convertirla de nuevo.
+export const isLinkedToProject = (record: ScopingRecordLike): boolean => record.converted_project_id != null;
+
+// El backend responde 409 si ya tiene proyecto o si no es exactamente "viable"
 export const isConvertibleRecord = (record: ScopingRecordLike): boolean =>
-  record.viability_status === 'viable' && record.status !== 'converted_to_project';
+  record.viability_status === 'viable' && !isLinkedToProject(record);

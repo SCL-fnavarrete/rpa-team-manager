@@ -4,7 +4,8 @@ import {
   canDeleteScoping,
   canModifyScoping,
   canSeeInternalCosts,
-  isConvertibleRecord
+  isConvertibleRecord,
+  isLinkedToProject
 } from '@/utils/scopingPermissions';
 
 const roles = ['team_lead', 'rpa_developer', 'rpa_operations', 'it_support', 'billing'] as const;
@@ -78,6 +79,22 @@ describe('isConvertibleRecord', () => {
     for (const viability_status of ['digitize_first', 'postpone', 'low_viability', 'not_viable']) {
       expect(isConvertibleRecord({ viability_status, status: 'draft' })).toBe(false);
     }
-    expect(isConvertibleRecord({ viability_status: 'viable', status: 'converted_to_project' })).toBe(false);
+    expect(isConvertibleRecord({ viability_status: 'viable', status: 'converted_to_project', converted_project_id: 12 })).toBe(false);
+  });
+
+  it('una fila "convertida" cuyo proyecto fue borrado (converted_project_id NULL) vuelve a ser convertible', () => {
+    expect(isConvertibleRecord({ viability_status: 'viable', status: 'converted_to_project', converted_project_id: null })).toBe(true);
+    expect(isConvertibleRecord({ viability_status: 'viable', status: 'converted_to_project' })).toBe(true);
+    // Pero un proceso no viable sigue sin poder convertirse
+    expect(isConvertibleRecord({ viability_status: 'not_viable', status: 'converted_to_project', converted_project_id: null })).toBe(false);
+  });
+});
+
+describe('isLinkedToProject', () => {
+  it('solo está ligada a un proyecto si converted_project_id tiene valor, sin importar el estado', () => {
+    expect(isLinkedToProject({ status: 'converted_to_project', converted_project_id: 12 })).toBe(true);
+    expect(isLinkedToProject({ status: 'converted_to_project', converted_project_id: null })).toBe(false);
+    expect(isLinkedToProject({ status: 'converted_to_project' })).toBe(false);
+    expect(isLinkedToProject({ status: 'draft', converted_project_id: null })).toBe(false);
   });
 });

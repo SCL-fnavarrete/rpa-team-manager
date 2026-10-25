@@ -34,7 +34,7 @@ import {
   ratesForCurrency,
   recordToFormValues
 } from '../../utils/scopingInputs';
-import { canConvertScoping, canSeeInternalCosts } from '../../utils/scopingPermissions';
+import { canConvertScoping, canSeeInternalCosts, isLinkedToProject } from '../../utils/scopingPermissions';
 import { MeetingTimerHeader } from '../../components/scoping/MeetingTimerHeader';
 import { DiscoveryWizard } from '../../components/scoping/DiscoveryWizard';
 import { LiveScoringSidebar } from '../../components/scoping/LiveScoringSidebar';
@@ -360,7 +360,7 @@ export const ScopingPage: React.FC = () => {
         code: historyProposal.code,
         date: historyProposal.created_at,
         id: historyProposal.id,
-        converted: historyProposal.status === 'converted_to_project'
+        converted: isLinkedToProject(historyProposal)
       }
     : calculation
       ? { inputs: currentInputs, calculation, code: savedQuoteCode, date: savedQuoteDate, id: lastSavedId, converted: false }
