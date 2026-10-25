@@ -313,6 +313,19 @@ describe('Cartera de proyectos - servicio y endpoint (SQLite real)', () => {
         expect(pipelineIds).not.toContain(terminado);
     });
 
+    it('el pipeline no lista proyectos cancelados aunque sigan en etapa de cotización', async () => {
+        const cotizando = await addProject({ name: 'Cotizando', stage: 'quoting', salePrice: 7000000 });
+        const cancelado = await addProject({ name: 'Cancelado', stage: 'quoting', status: 'cancelled', salePrice: 6000000 });
+        await addQuote(cotizando, 1, 7000000, 'CLP', 'sent');
+        await addQuote(cancelado, 1, 6000000, 'CLP', 'sent');
+
+        const result = await portfolioService.getPortfolio();
+
+        expect(result.pipeline.map(p => [p.project_id, p.last_quote_amount_clp])).toEqual([[cotizando, 7000000]]);
+        // la fila sigue en la cartera (con venta 0), solo sale del pipeline de cotizaciones vivas
+        expect(result.rows.map(r => r.project_id)).toEqual([cancelado, cotizando]);
+    });
+
     it('cada fila indica si su costo real viene de horas aprobadas o es una proyección sin horas aprobadas', async () => {
         const conHoras = await addProject({ name: 'Con horas', salePrice: 1000000, budgetedCost: 600000, budgetedHours: 100 });
         const sinHoras = await addProject({ name: 'Sin horas', salePrice: 1000000, budgetedCost: 600000, budgetedHours: 100 });

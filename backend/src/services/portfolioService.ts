@@ -32,6 +32,9 @@ const UNASSIGNED_REP_NAME = 'Sin asignar';
 /** Proyecto ya en marcha o terminado; una cotización real siempre está 'on_hold'. */
 const EXECUTION_STATUSES = ['active', 'completed'];
 
+/** Estados que sacan a un proyecto 'quoting' del pipeline: ya se ejecuta o terminó, o la cotización se canceló. */
+const OUT_OF_PIPELINE_STATUSES = [...EXECUTION_STATUSES, 'cancelled'];
+
 /**
  * Venta realizada: el cliente dio el OK (etapa 'approved') y el proyecto no se canceló; el resto (en cotización,
  * perdido, cancelado) no suma a venta, costo ni por facturar. También cuenta un proyecto 'quoting' ya activo o
@@ -188,7 +191,8 @@ export class PortfolioService {
 
     /**
      * Cotizaciones en curso con el monto de su última versión; ignora el filtro de etapa pero respeta el resto.
-     * Excluye los 'quoting' ya activos o completados porque la cartera los cuenta como venta realizada.
+     * Excluye los 'quoting' ya activos o completados (la cartera los cuenta como venta realizada) y los
+     * cancelados (cotización que ya no sigue viva).
      */
     private async getPipeline(filters: PortfolioFilters): Promise<PortfolioResult['pipeline']> {
         const { clause, params } = this.buildWhere({ ...filters, commercial_stage: 'quoting' });
@@ -198,9 +202,9 @@ export class PortfolioService {
              ${PROJECT_JOINS}
              LEFT JOIN project_quotes q ON q.project_id = p.id
                 AND q.version = (SELECT MAX(version) FROM project_quotes WHERE project_id = p.id)
-             ${clause} AND p.status NOT IN (${this.placeholders(EXECUTION_STATUSES)})
+             ${clause} AND p.status NOT IN (${this.placeholders(OUT_OF_PIPELINE_STATUSES)})
              ORDER BY p.name ASC, p.id ASC`,
-            [...params, ...EXECUTION_STATUSES]
+            [...params, ...OUT_OF_PIPELINE_STATUSES]
         );
 
         const pipeline: PortfolioResult['pipeline'] = [];
