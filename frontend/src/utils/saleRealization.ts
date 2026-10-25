@@ -9,9 +9,10 @@ interface CommercialState {
 }
 
 /**
- * El cliente dio el OK: etapa 'approved', o 'quoting' con el proyecto ya activo o completado. Esto último ocurre con
- * "Crear desde cotización", que crea el proyecto activo sin fijar la etapa y la BD le deja 'quoting' por defecto;
- * una cotización real nace 'on_hold' y no se puede activar sin la aprobación del cliente.
+ * El cliente dio el OK: etapa 'approved', o 'quoting' con el proyecto ya activo o completado. Esto último es una regla
+ * puente que hoy ningún flujo produce ("Crear desde cotización" nace 'approved' y activo; una cotización real nace
+ * 'on_hold' y no se puede activar sin la aprobación del cliente): solo cubre filas legacy, creadas desde cotización
+ * antes de que se fijara la etapa (la migración 49 corrige las existentes), o datos de demostración.
  */
 export const hasClientApproval = ({ commercial_stage, status }: CommercialState): boolean =>
   commercial_stage === 'approved' || (commercial_stage === 'quoting' && EXECUTION_STATUSES.includes(status));

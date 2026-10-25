@@ -37,10 +37,12 @@ const OUT_OF_PIPELINE_STATUSES = [...EXECUTION_STATUSES, 'cancelled'];
 
 /**
  * Venta realizada: el cliente dio el OK (etapa 'approved') y el proyecto no se canceló; el resto (en cotización,
- * perdido, cancelado) no suma a venta, costo ni por facturar. También cuenta un proyecto 'quoting' ya activo o
- * completado: "Crear desde cotización" (POST /projects/from-quote) lo crea activo sin fijar la etapa y la BD le
- * pone 'quoting' por defecto, mientras que una cotización real nace 'on_hold' (createProject y scoping) y
- * updateProject impide activarla sin la aprobación del cliente. Los internos nacen 'approved' en createProject.
+ * perdido, cancelado) no suma a venta, costo ni por facturar. Por regla puente también cuenta un proyecto
+ * 'quoting' ya activo o completado, pero hoy ningún flujo lo produce: "Crear desde cotización" (POST
+ * /projects/from-quote) nace 'approved' y activo, una cotización real nace 'on_hold' en 'quoting' (createProject y
+ * la conversión del cotizador) y updateProject impide activarla sin la aprobación del cliente. Solo cubre filas
+ * legacy (creadas desde cotización antes de que se fijara la etapa; la migración 49 corrige las existentes) o
+ * datos de demostración. Los internos nacen 'approved' en createProject.
  * Es el criterio único de venta realizada: la cartera y el Centro PMO ejecutivo lo comparten para que sus cifras cuadren.
  */
 export const isRealizedSale = (row: { status: string; commercial_stage: string }): boolean =>
