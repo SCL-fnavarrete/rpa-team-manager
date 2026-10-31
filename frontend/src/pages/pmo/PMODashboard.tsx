@@ -62,7 +62,6 @@ import { PMOControllerView } from '@/components/pmo/views/PMOControllerView';
 import { PMORolePerspective, PMOExecutiveSuiteResponse } from '@/types/pmo';
 
 const { Title, Text } = Typography;
-const { TabPane } = Tabs;
 
 interface PMODashboardData {
   projects: any[];
@@ -1213,8 +1212,15 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
             </Col>
           </Row>
 
-      <Tabs activeKey={activeTab} onChange={setActiveTab}>
-        <TabPane tab="Vista General" key="overview">
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        items={[
+          {
+            key: 'overview',
+            label: 'Vista General',
+            children: (
+              <>
           <Card title="Requieren atención" extra={<Tag>{needsAttention.length} proyectos</Tag>} style={{ marginBottom: 16 }}>
             <Space wrap style={{ width: '100%', marginBottom: 12 }}>
               <Input allowClear aria-label="Buscar proyectos" placeholder="Proyecto, cliente o responsable" value={projectFilter} onChange={event => setProjectFilter(event.target.value)} style={{ width: 'min(100%, 320px)' }} />
@@ -1604,10 +1610,14 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
               </Card>
             </Col>
           </Row>
-        </TabPane>
-
-        <TabPane tab="Análisis" key="analytics">
-          {analytics ? (
+              </>
+            )
+          },
+          {
+            key: 'analytics',
+            label: 'Análisis',
+            children: (
+          analytics ? (
             <div>
               {/* Executive Summary Cards */}
               <Row gutter={[16, 16]} style={{ marginBottom: '24px' }}>
@@ -2134,11 +2144,14 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                 <Text type="secondary">Preparando análisis avanzado de PMO</Text>
               </div>
             </Card>
-          )}
-        </TabPane>
-
-        <TabPane tab="Gantt Chart" key="gantt">
-          {!selectedProjectId ? (
+          )
+            )
+          },
+          {
+            key: 'gantt',
+            label: 'Gantt Chart',
+            children: (
+          !selectedProjectId ? (
             // Vista de selección de proyecto
             <Card title="Seleccionar Proyecto para Vista Gantt">
               <div style={{ textAlign: 'center', padding: '40px' }}>
@@ -2840,10 +2853,13 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                 </Card>
               )}
             </div>
-          )}
-        </TabPane>
-
-        <TabPane tab="🔗 Dependencias Externas" key="dependencies">
+          )
+            )
+          },
+          {
+            key: 'dependencies',
+            label: '🔗 Dependencias Externas',
+            children: (
           <Card>
             <Title level={3} style={{ marginBottom: '20px' }}>
               📊 Dashboard de Dependencias Externas
@@ -3001,9 +3017,12 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
               </Col>
             </Row>
           </Card>
-        </TabPane>
-
-        <TabPane tab="👥 Capacidad FTE" key="capacity">
+            )
+          },
+          {
+            key: 'capacity',
+            label: '👥 Capacidad FTE',
+            children: (
           <Card
             title={
               <Space>
@@ -3174,8 +3193,10 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
               ]}
             />
           </Card>
-        </TabPane>
-      </Tabs>
+            )
+          }
+        ]}
+      />
         </>
       )}
 
