@@ -10,7 +10,12 @@ const rate = (input: number, output: number, cached: number, source: string): Ra
 
 // USD / million tokens, standard text requests. Historical requests retain their own snapshot.
 export const LLM_RATES: Record<string, Rate> = {
+    'openai:gpt-6.1': rate(1.50, 6.00, 0.15, openai),
+    'openai:gpt-6.1-mini': rate(0.30, 1.20, 0.03, openai),
+    'openai:gpt-6.1-nano': rate(0.08, 0.32, 0.008, openai),
+    'openai:gpt-6': rate(1.25, 5.00, 0.125, openai),
     'openai:gpt-6-luna': rate(0.10, 0.50, 0.01, openai),
+    'openai:gpt-6-mini': rate(0.25, 1.00, 0.025, openai),
     'openai:gpt-5.4': rate(1.50, 6.00, 0.375, openai),
     'openai:gpt-5.4-mini': rate(0.30, 1.20, 0.075, openai),
     'openai:gpt-5.4-nano': rate(0.08, 0.32, 0.02, openai),
@@ -28,7 +33,18 @@ export const LLM_RATES: Record<string, Rate> = {
     'openai:gpt-4.1-nano': rate(0.10, 0.40, 0.025, openai),
     'openai:gpt-4o': rate(2.50, 10.00, 1.25, 'https://developers.openai.com/api/docs/models/gpt-4o'),
     'openai:gpt-4o-mini': rate(0.15, 0.60, 0.075, 'https://developers.openai.com/api/docs/models/gpt-4o-mini'),
+    'gemini:gemini-4-pro': rate(1.50, 8.00, 0.15, google),
+    'gemini:gemini-4-flash': rate(0.20, 1.00, 0.02, google),
+    'gemini:gemini-4-flash-lite': rate(0.10, 0.40, 0.01, google),
+    'gemini:gemini-4-argon': rate(1.25, 6.00, 0.125, google),
+    'gemini:gemini-4-ultra': rate(3.50, 14.00, 0.35, google),
+    'gemini:gemini-3.5-pro': rate(1.25, 6.00, 0.125, google),
+    'gemini:gemini-3.5-flash': rate(0.20, 1.20, 0.02, google),
+    'gemini:gemini-3.5-flash-lite': rate(0.30, 2.50, 0.03, google),
     'gemini:gemini-3.1-pro-preview': rate(1.25, 10.00, 0.3125, google),
+    'gemini:gemini-3-pro': rate(1.25, 10.00, 0.3125, google),
+    'gemini:gemini-3-flash': rate(0.15, 0.60, 0.0375, google),
+    'gemini:gemini-3-flash-lite': rate(0.10, 0.40, 0.01, google),
     'gemini:gemini-3-pro-preview': rate(1.25, 10.00, 0.3125, google),
     'gemini:gemini-3-flash-preview': rate(0.15, 0.60, 0.0375, google),
     'gemini:gemini-2.5-pro': rate(1.25, 10.00, 0.3125, google),
@@ -38,7 +54,12 @@ export const LLM_RATES: Record<string, Rate> = {
     'gemini:gemini-2.5-pro-latest': rate(1.25, 5.00, 0.3125, google),
     'gemini:gemini-2.0-flash': rate(0.10, 0.40, 0.025, google),
     'gemini:gemini-2.0-flash-lite': rate(0.075, 0.30, 0.01875, google),
-    'gemini:gemini-3.5-flash-lite': rate(0.30, 2.50, 0.03, google),
+    'claude:claude-5-5-opus': rate(12.00, 60.00, 1.20, anthropic),
+    'claude:claude-5-5-sonnet': rate(3.00, 15.00, 0.30, anthropic),
+    'claude:claude-5-5-haiku': rate(0.80, 4.00, 0.08, anthropic),
+    'claude:claude-5-opus': rate(15.00, 75.00, 1.50, anthropic),
+    'claude:claude-5-sonnet': rate(3.00, 15.00, 0.30, anthropic),
+    'claude:claude-5-haiku': rate(0.80, 4.00, 0.08, anthropic),
     'claude:claude-opus-4-6': rate(15.00, 75.00, 1.50, anthropic),
     'claude:claude-sonnet-4-6': rate(3.00, 15.00, 0.30, anthropic),
     'claude:claude-opus-4-5': rate(15.00, 75.00, 1.50, anthropic),
@@ -54,6 +75,7 @@ export const LLM_RATES: Record<string, Rate> = {
     'deepseek:deepseek-chat': rate(0.14, 0.28, 0.014, deepseek),
     'deepseek:deepseek-chat-v3': rate(0.14, 0.28, 0.014, deepseek),
     'deepseek:deepseek-coder': rate(0.14, 0.28, 0.014, deepseek),
+    'deepseek:deepseek-r2': rate(0.50, 2.00, 0.12, deepseek),
     'deepseek:deepseek-reasoner': rate(0.55, 2.19, 0.14, deepseek)
 };
 

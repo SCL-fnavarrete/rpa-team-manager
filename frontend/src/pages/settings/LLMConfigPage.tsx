@@ -58,34 +58,34 @@ const PROVIDERS: ProviderConfig[] = [
     key: 'openai',
     name: 'OpenAI',
     icon: '🤖',
-    description: 'GPT-6 Luna, GPT-5.4, GPT-5, serie o3 / o4-mini, GPT-4.1 y GPT-4o con nivel de razonamiento configurable',
+    description: 'GPT-6.1, GPT-6 Luna, GPT-5.4, GPT-5, serie o3 / o4-mini, GPT-4.1 y GPT-4o con razonamiento configurable',
     docUrl: 'https://platform.openai.com/api-keys',
     placeholder: 'sk-...',
-    defaultModel: 'gpt-5.4'
+    defaultModel: 'gpt-6.1'
   },
   {
     key: 'claude',
     name: 'Anthropic Claude',
     icon: '🧠',
-    description: 'Claude 4.6, Claude 4.5, Claude 4 (Opus, Sonnet, Haiku), Claude 3.7 y Claude 3.5 con razonamiento extendido',
+    description: 'Claude 5.5, Claude 5, Claude 4.6 / 4.5 / 4 (Opus, Sonnet, Haiku), Claude 3.7 y Claude 3.5',
     docUrl: 'https://console.anthropic.com/settings/keys',
     placeholder: 'sk-ant-...',
-    defaultModel: 'claude-sonnet-4-6'
+    defaultModel: 'claude-5-5-sonnet'
   },
   {
     key: 'gemini',
     name: 'Google Gemini',
     icon: '✨',
-    description: 'Gemini 3.1 / 3 Preview, Gemini 2.5 (Pro, Flash, Flash-Lite), Gemini 2.0 y Gemma 3',
+    description: 'Gemini 4 (Pro, Flash, Argon, Ultra), Gemini 3.5 / 3 (Pro, Flash, Flash-Lite), Gemini 2.5 y Gemma 4',
     docUrl: 'https://aistudio.google.com/app/apikey',
     placeholder: 'AIza...',
-    defaultModel: 'gemini-2.5-pro'
+    defaultModel: 'gemini-4-pro'
   },
   {
     key: 'deepseek',
     name: 'DeepSeek',
     icon: '🔍',
-    description: 'DeepSeek V3.2 Chat, DeepSeek R1 (Reasoner) y DeepSeek Coder',
+    description: 'DeepSeek V3.2 Chat, DeepSeek R1 / R2 (Reasoner) y DeepSeek Coder',
     docUrl: 'https://platform.deepseek.com/api_keys',
     placeholder: 'sk-...',
     defaultModel: 'deepseek-chat'
@@ -299,7 +299,7 @@ export const LLMConfigPage: React.FC = () => {
                 Modelos disponibles ({providerModels.length}):
               </Text>
               <Space size={[4, 6]} wrap>
-                {providerModels.slice(0, 6).map(m => (
+                {providerModels.slice(0, 12).map(m => (
                   <Tag
                     key={m.value}
                     color={savedKey?.selected_model === m.value ? 'blue' : undefined}
@@ -308,8 +308,8 @@ export const LLMConfigPage: React.FC = () => {
                     {m.label}
                   </Tag>
                 ))}
-                {providerModels.length > 6 && (
-                  <Tag style={{ margin: 0 }}>+{providerModels.length - 6} más</Tag>
+                {providerModels.length > 12 && (
+                  <Tag style={{ margin: 0 }}>+{providerModels.length - 12} más</Tag>
                 )}
               </Space>
             </div>

@@ -21,7 +21,12 @@ interface LLMApiKey {
 // Available models by provider
 export const AVAILABLE_MODELS = {
     openai: [
+        { value: 'gpt-6.1', label: 'GPT-6.1', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+        { value: 'gpt-6.1-mini', label: 'GPT-6.1 Mini', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh'] },
+        { value: 'gpt-6.1-nano', label: 'GPT-6.1 Nano', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'gpt-6', label: 'GPT-6', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
         { value: 'gpt-6-luna', label: 'GPT-6 Luna', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+        { value: 'gpt-6-mini', label: 'GPT-6 Mini', reasoning_options: ['none', 'low', 'medium', 'high'] },
         { value: 'gpt-5.4', label: 'GPT-5.4', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh'] },
         { value: 'gpt-5.4-mini', label: 'GPT-5.4 Mini', reasoning_options: ['none', 'low', 'medium', 'high'] },
         { value: 'gpt-5.4-nano', label: 'GPT-5.4 Nano', reasoning_options: ['none', 'low', 'medium', 'high'] },
@@ -29,9 +34,9 @@ export const AVAILABLE_MODELS = {
         { value: 'gpt-5', label: 'GPT-5', reasoning_options: ['minimal', 'low', 'medium', 'high'] },
         { value: 'gpt-5-mini', label: 'GPT-5 Mini', reasoning_options: ['minimal', 'low', 'medium', 'high'] },
         { value: 'gpt-5-nano', label: 'GPT-5 Nano', reasoning_options: ['minimal', 'low', 'medium', 'high'] },
+        { value: 'o4-mini', label: 'OpenAI o4-mini (Razonamiento)', reasoning_options: ['low', 'medium', 'high'] },
         { value: 'o3', label: 'OpenAI o3 (Razonamiento)', reasoning_options: ['low', 'medium', 'high'] },
         { value: 'o3-pro', label: 'OpenAI o3-pro (Razonamiento)', reasoning_options: ['low', 'medium', 'high'] },
-        { value: 'o4-mini', label: 'OpenAI o4-mini (Razonamiento)', reasoning_options: ['low', 'medium', 'high'] },
         { value: 'o3-mini', label: 'OpenAI o3-mini (Razonamiento)', reasoning_options: ['low', 'medium', 'high'] },
         { value: 'o1', label: 'OpenAI o1 (Razonamiento)', reasoning_options: ['low', 'medium', 'high'] },
         { value: 'gpt-4.1', label: 'GPT-4.1' },
@@ -44,12 +49,18 @@ export const AVAILABLE_MODELS = {
         { value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo' }
     ],
     claude: [
-        { value: 'claude-opus-4-6', label: 'Claude Opus 4.6', reasoning_options: ['none', 'low', 'medium', 'high', 'max'] },
-        { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', reasoning_options: ['none', 'low', 'medium', 'high', 'max'] },
-        { value: 'claude-opus-4-5', label: 'Claude Opus 4.5', reasoning_options: ['none', 'low', 'medium', 'high'] },
-        { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5', reasoning_options: ['none', 'low', 'medium', 'high'] },
-        { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', reasoning_options: ['none', 'low', 'medium', 'high'] },
-        { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'claude-5-5-opus', label: 'Claude 5.5 Opus', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+        { value: 'claude-5-5-sonnet', label: 'Claude 5.5 Sonnet', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+        { value: 'claude-5-5-haiku', label: 'Claude 5.5 Haiku', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'claude-5-opus', label: 'Claude 5 Opus', reasoning_options: ['none', 'low', 'medium', 'high', 'max'] },
+        { value: 'claude-5-sonnet', label: 'Claude 5 Sonnet', reasoning_options: ['none', 'low', 'medium', 'high', 'max'] },
+        { value: 'claude-5-haiku', label: 'Claude 5 Haiku', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'claude-opus-4-6', label: 'Claude 4.6 Opus', reasoning_options: ['none', 'low', 'medium', 'high', 'max'] },
+        { value: 'claude-sonnet-4-6', label: 'Claude 4.6 Sonnet', reasoning_options: ['none', 'low', 'medium', 'high', 'max'] },
+        { value: 'claude-opus-4-5', label: 'Claude 4.5 Opus', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'claude-sonnet-4-5', label: 'Claude 4.5 Sonnet', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'claude-haiku-4-5', label: 'Claude 4.5 Haiku', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'claude-opus-4-1-20250805', label: 'Claude 4.1 Opus', reasoning_options: ['none', 'low', 'medium', 'high'] },
         { value: 'claude-4-opus-20250514', label: 'Claude 4 Opus', reasoning_options: ['none', 'low', 'medium', 'high'] },
         { value: 'claude-4-sonnet-20250514', label: 'Claude 4 Sonnet', reasoning_options: ['none', 'low', 'medium', 'high'] },
         { value: 'claude-4-haiku-20250514', label: 'Claude 4 Haiku' },
@@ -61,7 +72,18 @@ export const AVAILABLE_MODELS = {
         { value: 'claude-3-haiku-20240307', label: 'Claude 3 Haiku' }
     ],
     gemini: [
-        { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', reasoning_options: ['low', 'medium', 'high'] },
+        { value: 'gemini-4-pro', label: 'Gemini 4 Pro', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+        { value: 'gemini-4-flash', label: 'Gemini 4 Flash', reasoning_options: ['none', 'low', 'medium', 'high', 'max'] },
+        { value: 'gemini-4-flash-lite', label: 'Gemini 4 Flash-Lite', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'gemini-4-argon', label: 'Gemini 4 Argon', reasoning_options: ['none', 'low', 'medium', 'high', 'xhigh', 'max'] },
+        { value: 'gemini-4-ultra', label: 'Gemini 4 Ultra', reasoning_options: ['low', 'medium', 'high', 'xhigh', 'max'] },
+        { value: 'gemini-3.5-pro', label: 'Gemini 3.5 Pro', reasoning_options: ['low', 'medium', 'high', 'max'] },
+        { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash-Lite', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro', reasoning_options: ['low', 'medium', 'high'] },
+        { value: 'gemini-3-pro', label: 'Gemini 3 Pro', reasoning_options: ['low', 'medium', 'high'] },
+        { value: 'gemini-3-flash', label: 'Gemini 3 Flash', reasoning_options: ['none', 'low', 'medium', 'high'] },
+        { value: 'gemini-3-flash-lite', label: 'Gemini 3 Flash-Lite', reasoning_options: ['none', 'low', 'medium', 'high'] },
         { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview', reasoning_options: ['low', 'medium', 'high'] },
         { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview', reasoning_options: ['none', 'low', 'medium', 'high'] },
         { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', reasoning_options: ['low', 'medium', 'high'] },
@@ -73,11 +95,13 @@ export const AVAILABLE_MODELS = {
         { value: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash-Lite' },
         { value: 'gemini-1.5-pro-latest', label: 'Gemini 1.5 Pro' },
         { value: 'gemini-1.5-flash-latest', label: 'Gemini 1.5 Flash' },
+        { value: 'gemma-4-27b-it', label: 'Gemma 4 27B Instruct' },
         { value: 'gemma-3-27b-it', label: 'Gemma 3 27B Instruct' }
     ],
     deepseek: [
         { value: 'deepseek-chat', label: 'DeepSeek V3.2 Chat (deepseek-chat)' },
-        { value: 'deepseek-reasoner', label: 'DeepSeek R1 Reasoner (deepseek-reasoner)', reasoning_options: ['low', 'medium', 'high'] },
+        { value: 'deepseek-reasoner', label: 'DeepSeek R1 / R2 Reasoner (deepseek-reasoner)', reasoning_options: ['low', 'medium', 'high', 'max'] },
+        { value: 'deepseek-r2', label: 'DeepSeek R2 (Razonamiento)', reasoning_options: ['low', 'medium', 'high', 'max'] },
         { value: 'deepseek-chat-v3', label: 'DeepSeek V3' },
         { value: 'deepseek-coder', label: 'DeepSeek Coder' }
     ]
