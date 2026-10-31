@@ -16,7 +16,9 @@ import {
   message,
   Tooltip,
   Badge,
-  Divider
+  Divider,
+  Segmented,
+  Table
 } from 'antd';
 import {
   PlusOutlined,
@@ -29,10 +31,13 @@ import {
   CheckSquareOutlined,
   TeamOutlined,
   LinkOutlined,
-  RocketOutlined
+  RocketOutlined,
+  PlayCircleOutlined,
+  AppstoreOutlined,
+  UnorderedListOutlined
 } from '@ant-design/icons';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { apiService } from '@/services/api';
 import { TaskSubtasksChecklist } from '@/components/tasks/TaskSubtasksChecklist';
 import { CommentsThread } from '@/components/comments/CommentsThread';
@@ -138,12 +143,18 @@ function savePersistedFilters(filters: PersistedTaskFilters): void {
 }
 
 export const TasksPage: React.FC = () => {
+  const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [boards, setBoards] = useState<Board[]>([]);
   const [selectedBoard, setSelectedBoard] = useState<Board | null>(null);
   const [selectedProject, setSelectedProject] = useState<number | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  const [viewMode, setViewMode] = useState<'board' | 'my_tasks'>(
+    () => (searchParams.get('view') === 'my-tasks' ? 'my_tasks' : 'board')
+  );
+  const [myTasks, setMyTasks] = useState<any[]>([]);
+  const [myTasksLoading, setMyTasksLoading] = useState(false);
   const [pendingBoardId, setPendingBoardId] = useState<number | null>(null);
   const [pendingTaskId, setPendingTaskId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
@@ -193,6 +204,69 @@ export const TasksPage: React.FC = () => {
       loadBoards();
     }
   }, [selectedProject]);
+
+  const loadMyTasks = async () => {
+    try {
+      setMyTasksLoading(true);
+      const data = await apiService.get('/tasks/my-tasks');
+      setMyTasks(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error('🔴 TasksPage: Error loading my tasks:', error);
+      message.error('Error al cargar tus tareas asignadas');
+    } finally {
+      setMyTasksLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (viewMode === 'my_tasks') {
+      loadMyTasks();
+    }
+  }, [viewMode]);
+
+  const handleInlineMyTaskStatusChange = async (taskId: number, newStatus: string) => {
+    try {
+      await apiService.put(`/tasks/${taskId}`, { status: newStatus });
+      message.success('Estado de tarea actualizado');
+      setMyTasks((prev) =>
+        newStatus === 'done'
+          ? prev.filter((t) => t.id !== taskId)
+          : prev.map((t) => (t.id === taskId ? { ...t, status: newStatus as Task['status'] } : t))
+      );
+      if (selectedBoard) {
+        loadBoards();
+      }
+    } catch {
+      message.error('No se pudo actualizar el estado de la tarea');
+    }
+  };
+
+  const handleStartTaskTimer = async (task: { id: number; title: string; project_id?: number }) => {
+    const projectId = task.project_id || selectedProject || selectedBoard?.project_id;
+    if (!projectId) {
+      navigate(`/time`);
+      return;
+    }
+    try {
+      if (typeof (apiService as any).post === 'function') {
+        await apiService.post('/time-entries/start-timer', {
+          project_id: projectId,
+          task_id: task.id,
+          description: task.title
+        });
+        message.success(`Cronómetro iniciado en "${task.title}"`);
+        window.dispatchEvent(new CustomEvent('rpa-timer-updated'));
+      } else {
+        navigate(`/time?project_id=${projectId}&task_id=${task.id}`);
+      }
+    } catch (error: any) {
+      const apiErr = error?.response?.data?.error;
+      if (apiErr) {
+        message.warning(`${apiErr}. Redirigiendo a Control de Horas...`);
+      }
+      navigate(`/time?project_id=${projectId}&task_id=${task.id}`);
+    }
+  };
 
   useEffect(() => {
     const taskIdParam = searchParams.get('taskId');
@@ -717,6 +791,23 @@ export const TasksPage: React.FC = () => {
                   e.stopPropagation();
                 }}
               >
+                <Tooltip title="Iniciar cronómetro / Imputar horas en esta tarea">
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<PlayCircleOutlined />}
+                    aria-label="Iniciar timer en tarea"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      handleStartTaskTimer(task);
+                    }}
+                    style={{
+                      cursor: 'pointer',
+                      pointerEvents: 'auto'
+                    }}
+                  />
+                </Tooltip>
                 <Tooltip title="Editar">
                   <Button
                     size="small"
@@ -835,12 +926,127 @@ export const TasksPage: React.FC = () => {
 
   return (
     <div style={{ padding: '24px' }}>
-      <div style={{ marginBottom: '24px' }}>
-        <Title level={2}>Tareas del equipo</Title>
-        <Text type="secondary">
-          Organiza el trabajo por proyecto, revisa responsables, prioridades y fechas, y registra el tiempo dedicado.
-        </Text>
+      <div style={{ marginBottom: '24px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 16 }}>
+        <div>
+          <Title level={2} style={{ marginBottom: 4 }}>Tareas del equipo</Title>
+          <Text type="secondary">
+            Organiza el trabajo por proyecto, revisa responsables, prioridades y fechas, y registra el tiempo dedicado.
+          </Text>
+        </div>
+        <Segmented
+          value={viewMode}
+          onChange={(val) => setViewMode(val as 'board' | 'my_tasks')}
+          options={[
+            { label: 'Tablero por Proyecto', value: 'board', icon: <AppstoreOutlined /> },
+            { label: 'Mis Tareas (Todos mis proyectos)', value: 'my_tasks', icon: <UnorderedListOutlined /> }
+          ]}
+        />
       </div>
+
+      {viewMode === 'my_tasks' ? (
+        <Card
+          title="Mis tareas activas en todos los proyectos"
+          extra={<Button size="small" onClick={loadMyTasks} loading={myTasksLoading}>Actualizar</Button>}
+          style={{ marginBottom: 24 }}
+        >
+          <Table
+            rowKey="id"
+            loading={myTasksLoading}
+            dataSource={myTasks}
+            locale={{ emptyText: 'No tienes tareas pendientes asignadas actualmente.' }}
+            columns={[
+              {
+                title: 'Proyecto',
+                dataIndex: 'project_name',
+                render: (name: string, r: any) => (
+                  <Link to={`/projects/${r.project_id}`}><Tag color="processing">{name || `Proyecto #${r.project_id}`}</Tag></Link>
+                )
+              },
+              {
+                title: 'Tarea',
+                dataIndex: 'title',
+                render: (title: string, r: any) => (
+                  <Space direction="vertical" size={0}>
+                    <Text strong>{getTaskTypeIcon(r.task_type)} {title}</Text>
+                    {r.column_name && <Text type="secondary" style={{ fontSize: 12 }}>Columna: {r.column_name}</Text>}
+                  </Space>
+                )
+              },
+              {
+                title: 'Prioridad',
+                dataIndex: 'priority',
+                width: 110,
+                render: (p: Task['priority']) => (
+                  <Tag color={getPriorityColor(p)}>
+                    {{ critical: 'Crítica', high: 'Alta', medium: 'Media', low: 'Baja' }[p] || p}
+                  </Tag>
+                )
+              },
+              {
+                title: 'Estado (1-clic)',
+                dataIndex: 'status',
+                width: 165,
+                render: (st: Task['status'], r: any) => (
+                  <Select
+                    size="small"
+                    style={{ width: 150 }}
+                    value={st}
+                    onChange={(newStatus) => void handleInlineMyTaskStatusChange(r.id, newStatus)}
+                    options={[
+                      { value: 'todo', label: 'Por Hacer' },
+                      { value: 'in_progress', label: 'En Progreso' },
+                      { value: 'review', label: 'En Revisión' },
+                      { value: 'testing', label: 'En Pruebas' },
+                      { value: 'blocked', label: 'Bloqueado' },
+                      { value: 'done', label: 'Completada ✓' }
+                    ]}
+                  />
+                )
+              },
+              {
+                title: 'Vencimiento',
+                dataIndex: 'due_date',
+                width: 120,
+                render: (d: string) => d ? dayjs(d).format('DD/MM/YYYY') : <Text type="secondary">-</Text>
+              },
+              {
+                title: 'Horas (Real / Est.)',
+                width: 150,
+                render: (_: any, r: any) => (
+                  <Text>{r.total_hours || 0}h / {r.estimated_hours || 0}h</Text>
+                )
+              },
+              {
+                title: 'Acciones',
+                width: 240,
+                render: (_: any, r: any) => (
+                  <Space size="small">
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<PlayCircleOutlined />}
+                      onClick={() => handleStartTaskTimer({ id: r.id, title: r.title, project_id: r.project_id })}
+                    >
+                      Iniciar Timer
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setSelectedProject(r.project_id);
+                        setPendingBoardId(r.board_id);
+                        setPendingTaskId(r.id);
+                        setViewMode('board');
+                      }}
+                    >
+                      Ver en Kanban
+                    </Button>
+                  </Space>
+                )
+              }
+            ]}
+          />
+        </Card>
+      ) : null}
 
       {/* Project and Board Selection */}
       <Card style={{ marginBottom: 24 }}>

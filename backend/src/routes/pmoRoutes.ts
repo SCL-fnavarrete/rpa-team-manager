@@ -25,6 +25,9 @@ router.get('/dashboard', authorize(['team_lead', 'rpa_operations']), pmoControll
 // GET /api/pmo/analytics - Advanced analytics and reporting
 router.get('/analytics', authorize(['team_lead', 'rpa_operations']), pmoController.getPMOAnalytics);
 
+// GET /api/pmo/executive-suite - Integrated Executive Suite (General Manager, Commercial, Controller)
+router.get('/executive-suite', authorize(['team_lead', 'rpa_operations', 'billing']), pmoController.getPMOExecutiveSuite);
+
 // ========================================
 // PROJECT GANTT & TIMELINE ROUTES
 // ========================================

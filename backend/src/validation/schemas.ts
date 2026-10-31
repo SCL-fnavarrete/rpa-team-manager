@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { SCOPING_OPTIONS } from '../services/scopingCalculationEngine';
 
 // User validation schemas
 // Note: password length/complexity is enforced at creation/change time (createUserSchema),
@@ -222,3 +223,82 @@ export const submitWeekSchema = z.object({
 export const rejectWeekSchema = z.object({
     reason: z.string().min(1, 'A rejection reason is required').max(500)
 });
+
+// Cotizador RPA (scoping). El motor exige entradas completas y numéricas; aquí se rechaza todo lo demás.
+// Estos mensajes le llegan tal cual al usuario (validate(..., { inlineErrors: true })), por eso van en español.
+const SCOPING_MAX_NUMBER = 1_000_000_000;
+const SCOPING_WEEKS_MESSAGE = 'Las semanas estimadas deben ser un número entero entre 1 y 520';
+const SCOPING_STATUSES = ['draft', 'sent_to_client', 'approved', 'rejected', 'converted_to_project'] as const;
+
+const scopingOption = (values: readonly [string, ...string[]], message: string) => z.enum(values, { error: message });
+const scopingNonNegative = (message: string) => z.number({ error: message }).min(0, message).max(SCOPING_MAX_NUMBER, message);
+const scopingPercent = (message: string) => z.number({ error: message }).min(0, message).max(100, message);
+const scopingText = (field: string, max: number) =>
+    z.string({ error: `El campo ${field} debe ser texto` }).max(max, `El campo ${field} no puede superar ${max} caracteres`);
+const scopingRequiredText = (label: string, max: number) =>
+    z.string({ error: `${label} es obligatorio` }).trim().min(1, `${label} es obligatorio`).max(max, `${label} no puede superar ${max} caracteres`);
+
+const scopingCustomHours = z.object({
+    lp: scopingNonNegative('Las horas del Líder de Proyecto (LP) deben ser un número mayor o igual a cero'),
+    crpa: scopingNonNegative('Las horas del Consultor RPA (CRPA) deben ser un número mayor o igual a cero'),
+    ar: scopingNonNegative('Las horas del Automatizador (AR) deben ser un número mayor o igual a cero'),
+    adv: scopingNonNegative('Las horas de los Advisors (ADV) deben ser un número mayor o igual a cero'),
+    weeks: z.number({ error: SCOPING_WEEKS_MESSAGE }).int(SCOPING_WEEKS_MESSAGE).min(1, SCOPING_WEEKS_MESSAGE).max(520, SCOPING_WEEKS_MESSAGE)
+}, { error: 'Las horas calibradas deben enviarse como un objeto' }).partial();
+
+const scopingBodyError = (issue: { input?: unknown }) =>
+    issue.input === undefined ? 'El cuerpo de la solicitud está vacío' : 'El cuerpo de la solicitud no es válido';
+
+// Un cuerpo {} se informa como "vacío" en vez de listar el primer campo faltante.
+const scopingBody = <T extends z.ZodType>(schema: T) =>
+    z.preprocess((value) => (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0 ? undefined : value), schema);
+
+// Entradas del cálculo. custom_hours: null o ausente = sin calibración manual.
+const scopingInputsShape = {
+    data_input_type: scopingOption(SCOPING_OPTIONS.data_input_type, 'El tipo de entrada de datos no es válido'),
+    rule_based_level: scopingOption(SCOPING_OPTIONS.rule_based_level, 'El nivel de reglas del proceso no es válido'),
+    process_stability: scopingOption(SCOPING_OPTIONS.stability, 'La estabilidad del proceso no es válida'),
+    application_stability: scopingOption(SCOPING_OPTIONS.stability, 'La estabilidad de las aplicaciones no es válida'),
+    frequency: scopingOption(SCOPING_OPTIONS.frequency, 'La frecuencia del proceso no es válida'),
+    volume_per_frequency: z.number({ error: 'El volumen por frecuencia debe ser un número' })
+        .min(1, 'El volumen por frecuencia debe ser al menos 1').max(SCOPING_MAX_NUMBER, 'El volumen por frecuencia es demasiado grande'),
+    aht_minutes: z.number({ error: 'El tiempo promedio por ejecución (AHT) debe ser un número' })
+        .gt(0, 'El tiempo promedio por ejecución (AHT) debe ser mayor que cero').max(SCOPING_MAX_NUMBER, 'El tiempo promedio por ejecución (AHT) es demasiado grande'),
+    current_ftes: scopingNonNegative('Los colaboradores actuales (FTEs) deben ser un número mayor o igual a cero').optional(),
+    error_rate_pct: scopingPercent('La tasa de error debe ser un número entre 0 y 100').optional(),
+    peak_period: scopingOption(SCOPING_OPTIONS.peak_period, 'El periodo punta no es válido').optional(),
+    process_steps_count: scopingOption(SCOPING_OPTIONS.process_steps_count, 'La cantidad de pasos del proceso no es válida'),
+    decision_complexity: scopingOption(SCOPING_OPTIONS.decision_complexity, 'La complejidad de las decisiones no es válida'),
+    applications_count: scopingOption(SCOPING_OPTIONS.applications_count, 'La cantidad de aplicaciones no es válida'),
+    uses_vdi: z.boolean({ error: 'El indicador de VDI debe ser verdadero o falso' }),
+    requires_ocr: z.boolean({ error: 'El indicador de OCR debe ser verdadero o falso' }),
+    structured_data_pct: scopingOption(SCOPING_OPTIONS.structured_data_pct, 'El porcentaje de datos estructurados no es válido'),
+    exception_rate_pct: scopingPercent('La tasa de excepciones debe ser un número entre 0 y 100').optional(),
+    currency: scopingOption(SCOPING_OPTIONS.currency, 'La moneda debe ser CLP, USD o UF').optional(),
+    hourly_labor_cost: scopingNonNegative('El costo hora del analista del cliente debe ser un número mayor o igual a cero').optional(),
+    target_hourly_rate: scopingNonNegative('La tarifa de venta por hora debe ser un número mayor o igual a cero').optional(),
+    internal_cost_rate: scopingNonNegative('El costo interno por hora debe ser un número mayor o igual a cero').optional(),
+    custom_hours: scopingCustomHours.nullable().optional()
+};
+
+// Datos del levantamiento. Cada campo que el controller lea debe declararse aquí: zod descarta el resto.
+const scopingDetailsShape = {
+    client_name: scopingRequiredText('El nombre del cliente', 150),
+    process_name: scopingRequiredText('El nombre del proceso', 200),
+    client_contact: scopingText('contacto del cliente', 150).nullable().optional(),
+    client_email: scopingText('correo del cliente', 150).nullable().optional(),
+    business_unit: scopingText('unidad de negocio', 100).nullable().optional(),
+    process_archetype: z.string({ error: 'El arquetipo del proceso no es válido' }).trim().min(1, 'El arquetipo del proceso no es válido').max(50, 'El arquetipo del proceso no es válido').optional(),
+    applications_detail: scopingText('detalle de aplicaciones', 2000).nullable().optional(),
+    assumptions: scopingText('supuestos', 5000).nullable().optional(),
+    exclusions: scopingText('exclusiones', 5000).nullable().optional(),
+    notes: scopingText('notas', 5000).nullable().optional(),
+    status: scopingOption(SCOPING_STATUSES, 'El estado del levantamiento no es válido').optional()
+};
+
+const scopingCreateShape = { ...scopingDetailsShape, ...scopingInputsShape };
+
+export const calculateScopingSchema = scopingBody(z.object(scopingInputsShape, { error: scopingBodyError }));
+export const createScopingSchema = scopingBody(z.object(scopingCreateShape, { error: scopingBodyError }));
+// PUT parcial: lo que no llega se conserva del registro guardado (ver ScopingService.update).
+export const updateScopingSchema = scopingBody(z.object(scopingCreateShape, { error: scopingBodyError }).partial());

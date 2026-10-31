@@ -5,6 +5,18 @@ import { logger } from '../utils/logger';
 import * as ExcelJS from 'exceljs';
 import multer from 'multer';
 import fs from 'fs';
+import { selectWritableColumns } from '../utils/columnWhitelist';
+
+/**
+ * Columnas de support_tickets que un cliente puede escribir con PUT /support/tickets/:id. id, id_ticket,
+ * created_by, created_at, resolved_at y updated_at las fija el servidor; id_ticket es la clave de la ruta y se
+ * descarta sin error porque el formulario la envía junto al resto.
+ */
+const SUPPORT_TICKET_UPDATABLE_COLUMNS = [
+    'company_id', 'title', 'description', 'priority', 'status', 'ticket_type', 'resolver_id', 'hours_spent',
+    'attention_method', 'rpa_process_id', 'contact_id', 'work_date', 'completion_date'
+] as const;
+const SUPPORT_TICKET_IGNORED_KEYS = ['id_ticket'] as const;
 
 export class SupportController {
 
@@ -587,6 +599,7 @@ export class SupportController {
             `);
             const nextId = nextIdResult.next_id;
 
+            const hoursSpent = Math.round(((Number(time_invested_minutes) || 0) / 60.0) * 100) / 100;
             await db.run(`
                 INSERT INTO support_tickets (
                     id, id_ticket, company_id, title, description, priority, status,
@@ -596,9 +609,47 @@ export class SupportController {
                 ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, NULL, ?, datetime('now'), NULL, datetime('now'), ?, ?, ?)
             `, [
                 nextId, finalTicketId, company_id, client_name, description, priority,
-                ticket_type, req.user?.id, (time_invested_minutes || 0) / 60.0,
+                ticket_type, req.user?.id, hoursSpent,
                 attention_method, work_date, completion_date
             ]);
+
+            if (hoursSpent > 0 && hoursSpent <= 24 && req.user?.id) {
+                const linkedProject = await db.get(
+                    `SELECT p.id FROM projects p
+                     LEFT JOIN clients c ON c.id = p.client_id
+                     WHERE LOWER(TRIM(c.name)) = LOWER(TRIM(?))
+                        OR LOWER(TRIM(p.name)) LIKE LOWER(TRIM(?))
+                     ORDER BY p.id DESC LIMIT 1`,
+                    [company.company_name, `%${rpa_process || company.company_name}%`]
+                );
+                if (linkedProject?.id) {
+                    const entryDate = work_date ? String(work_date).slice(0, 10) : new Date().toISOString().slice(0, 10);
+                    const lockedPeriod = await db.get(
+                        `SELECT id FROM timesheet_periods WHERE user_id = ? AND period_start <= ? AND period_end >= ? AND status IN ('submitted', 'approved')`,
+                        [req.user.id, entryDate, entryDate]
+                    );
+                    if (!lockedPeriod) {
+                        const openPeriod = await db.get(
+                            `SELECT id FROM timesheet_periods WHERE user_id = ? AND period_start <= ? AND period_end >= ? AND status = 'open'`,
+                            [req.user.id, entryDate, entryDate]
+                        );
+                        await db.run(
+                            `INSERT INTO time_entries (
+                                user_id, project_id, description, hours, date, is_billable,
+                                approval_status, timesheet_period_id, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, 1, 'draft', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+                            [
+                                req.user.id,
+                                linkedProject.id,
+                                `[Soporte ${finalTicketId} · ${company.company_name}] ${description}`,
+                                hoursSpent,
+                                entryDate,
+                                openPeriod?.id ?? null
+                            ]
+                        );
+                    }
+                }
+            }
 
             // Get the created ticket with company info
             const newTicket = await db.get(`
@@ -624,11 +675,18 @@ export class SupportController {
     updateSupportTicket = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
         try {
             const { id } = req.params;
-            const updates = req.body;
+
+            // Los nombres de columna salen siempre de la lista blanca, nunca de las claves que envía el cliente
+            const selection = selectWritableColumns(req.body, SUPPORT_TICKET_UPDATABLE_COLUMNS, SUPPORT_TICKET_IGNORED_KEYS);
+            if ('error' in selection) {
+                res.status(400).json({ error: selection.error });
+                return;
+            }
+            const { columns, values } = selection;
 
             // Check if ticket exists
             const existingTicket = await db.get(
-                'SELECT * FROM support_tickets WHERE id_ticket = ?', 
+                'SELECT * FROM support_tickets WHERE id_ticket = ?',
                 [id]
             );
 
@@ -637,35 +695,26 @@ export class SupportController {
                 return;
             }
 
-            // Build update query dynamically
-            const fields = [];
-            const values = [];
-            
-            for (const [key, value] of Object.entries(updates)) {
-                if (value !== undefined && key !== 'id_ticket') {
-                    fields.push(`${key} = ?`);
-                    values.push(value);
-                }
-            }
-
-            if (fields.length === 0) {
-                res.status(400).json({ error: 'No fields to update' });
+            if (columns.length === 0) {
+                res.status(400).json({ error: 'No hay campos para actualizar' });
                 return;
             }
 
+            const fields = columns.map(column => `${column} = ?`);
+
             // Auto-set resolved_at if status is resolved or closed
-            if (updates.status && ['resolved', 'closed'].includes(updates.status)) {
+            const status = values[columns.indexOf('status')];
+            if (status && ['resolved', 'closed'].includes(String(status))) {
                 fields.push('resolved_at = datetime(\'now\')');
             }
 
             fields.push('updated_at = datetime(\'now\')');
-            values.push(id);
 
             await db.run(`
-                UPDATE support_tickets 
-                SET ${fields.join(', ')} 
+                UPDATE support_tickets
+                SET ${fields.join(', ')}
                 WHERE id_ticket = ?
-            `, values);
+            `, [...values, id]);
 
             // Get updated ticket
             const updatedTicket = await db.get(`

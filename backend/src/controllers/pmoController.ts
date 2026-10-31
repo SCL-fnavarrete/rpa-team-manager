@@ -2,6 +2,11 @@ import { Request, Response } from 'express';
 import { db } from '../database/database';
 import { logger } from '../utils/logger';
 import { activityLogService } from '../services/activityLogService';
+import { financeService, Currency, ProjectFinancials } from '../services/financeService';
+import { billingService } from '../services/billingService';
+import { timesheetService } from '../services/timesheetService';
+import { isRealizedSale, portfolioService } from '../services/portfolioService';
+import { isPlainObject, selectWritableColumns } from '../utils/columnWhitelist';
 
 interface AuthenticatedRequest extends Request {
     user?: {
@@ -11,6 +16,132 @@ interface AuthenticatedRequest extends Request {
         full_name: string;
     };
 }
+
+type SuiteRow = Record<string, unknown>;
+
+/** Respuesta de GET /pmo/executive-suite; solo tipa las secciones que stripFinancials recorre. */
+export interface ExecutiveSuiteResponse {
+    general_manager: { consolidated_pnl: SuiteRow; top_risk_projects: SuiteRow[] } & SuiteRow;
+    commercial: { scope_creep_alerts: SuiteRow[] } & SuiteRow;
+    controller: { triple_conciliation: SuiteRow[] } & SuiteRow;
+}
+
+/** Decisión de producto: sueldos, HH, costos y márgenes solo los ve team_lead (Facturación ve hitos y facturas). */
+const FINANCIAL_ROLES = ['team_lead'];
+const canSeeFinancials = (role: string | undefined): boolean => role !== undefined && FINANCIAL_ROLES.includes(role);
+
+const omit = (row: SuiteRow, keys: string[]): SuiteRow =>
+    Object.fromEntries(Object.entries(row).filter(([key]) => !keys.includes(key)));
+
+/**
+ * Quita de la respuesta del Centro PMO ejecutivo todo costo, utilidad, margen y CPI (derivado del costo) cuando
+ * el rol no es team_lead; un rol ausente o desconocido se trata como sin permiso. No modifica el objeto recibido.
+ * Se conserva lo de cobranza: hitos, facturas, cartera vencida, aging e imputación por centro de costo (reparte el
+ * monto de venta del proyecto, no es costo interno), y las alertas, riesgos, scope creep e imputaciones faltantes.
+ */
+export const stripFinancials = (data: ExecutiveSuiteResponse, role: string | undefined): ExecutiveSuiteResponse => {
+    if (canSeeFinancials(role)) return data;
+    return {
+        general_manager: {
+            ...data.general_manager,
+            consolidated_pnl: omit(data.general_manager.consolidated_pnl, ['total_real_cost_clp', 'total_gross_profit_clp', 'avg_margin_pct']),
+            top_risk_projects: data.general_manager.top_risk_projects.map(project =>
+                omit(project, ['cost_variance_clp', 'real_cost_clp', 'budgeted_cost_clp'])
+            )
+        },
+        commercial: {
+            ...omit(data.commercial, ['margin_variance']),
+            scope_creep_alerts: data.commercial.scope_creep_alerts.map(alert => omit(alert, ['overrun_cost_clp']))
+        },
+        controller: {
+            ...data.controller,
+            triple_conciliation: data.controller.triple_conciliation.map(row =>
+                omit(row, ['cost_consumed_pct', 'cpi', 'budgeted_cost_clp', 'real_cost_clp'])
+            )
+        }
+    };
+};
+
+/**
+ * Columnas de project_pmo_metrics que un cliente puede escribir con POST /pmo/projects/:id/metrics. El resto
+ * (id, project_id, last_updated, updated_by) las fija el servidor. Es una lista cerrada: nunca se interpola en SQL
+ * una clave del cuerpo de la petición.
+ */
+export const PMO_METRICS_COLUMNS = [
+    'planned_hours', 'planned_start_date', 'planned_end_date', 'planned_budget',
+    'actual_hours', 'actual_start_date', 'actual_end_date', 'actual_cost',
+    'completion_percentage', 'completed_tasks', 'total_tasks',
+    'schedule_variance_days', 'cost_variance_percentage', 'scope_variance_percentage',
+    'risk_level', 'risk_factors', 'bugs_found', 'bugs_resolved', 'client_satisfaction_score', 'team_velocity'
+] as const;
+
+/**
+ * Columnas de project_milestones que un cliente puede escribir con PUT /pmo/milestones/:id: las que envía el
+ * formulario de edición del Gantt (PMODashboard, único llamador), más las de createMilestone y las del ejemplo de
+ * docs/pmo-api.md (completion_percentage). project_id, created_by, created_at, updated_at y baseline_planned_date
+ * las fija el servidor.
+ */
+const MILESTONE_UPDATABLE_COLUMNS = [
+    'name', 'description', 'milestone_type', 'planned_date', 'end_date', 'actual_date', 'status', 'priority',
+    'responsible_user_id', 'completion_percentage', 'impact_on_timeline', 'responsibility', 'blocking_reason',
+    'delay_justification', 'external_contact', 'estimated_delay_days', 'financial_impact'
+] as const;
+
+// Un cliente puede devolver el hito completo: estas claves del servidor se descartan sin error, como ya hacía la ruta
+const MILESTONE_IGNORED_KEYS = ['id', 'created_by', 'created_at'] as const;
+
+const MILESTONE_RESPONSE_KEYS = ['id', 'project_id', ...MILESTONE_UPDATABLE_COLUMNS, 'responsible_name', 'project_name'] as const;
+
+const PMO_METRICS_SELECT = `SELECT id, project_id, ${PMO_METRICS_COLUMNS.join(', ')}, last_updated, updated_by
+                FROM project_pmo_metrics WHERE project_id = ?`;
+
+/**
+ * Claves de presupuesto y costo que salen de /pmo/dashboard, /pmo/analytics, /pmo/projects/:id/gantt y
+ * /pmo/projects/:id/metrics. Solo nombres exactos: budgeted_hours (horas, no dinero) y financial_impact (impacto
+ * del atraso de un hito) no son presupuesto del proyecto y se siguen mostrando.
+ */
+const BUDGET_COST_KEYS = new Set([
+    'budget', 'planned_budget', 'actual_cost', 'cost_variance_percentage', 'budget_utilization_percentage', 'budget_performance',
+    'total_planned_budget', 'total_actual_cost', 'overall_budget_variance', 'over_budget_projects',
+    'budget_planned', 'budget_spent', 'budgetAnalysis', 'on_budget_projects', 'total_budget_managed', 'avg_budget_variance',
+    'on_budget_deliveries', 'on_budget_rate'
+]);
+
+const withoutBudgetKeys = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(withoutBudgetKeys);
+    if (!isPlainObject(value)) return value;
+    return Object.fromEntries(
+        Object.entries(value).filter(([key]) => !BUDGET_COST_KEYS.has(key)).map(([key, child]) => [key, withoutBudgetKeys(child)])
+    );
+};
+
+/**
+ * Quita el presupuesto y los costos (planned_budget, actual_cost, desvíos de costo y sus agregados) de la respuesta
+ * de las rutas de PMO cuando el rol no es team_lead; un rol ausente o desconocido se trata como sin permiso.
+ * Recorre arreglos y objetos anidados sin modificar el original; team_lead recibe todo igual.
+ */
+export const stripBudgetFields = <T>(data: T, role: string | undefined): T =>
+    canSeeFinancials(role) ? data : withoutBudgetKeys(data) as T;
+
+const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+const HEALTH_RANK: Record<string, number> = { critical: 0, warning: 1, healthy: 2 };
+
+/** Orden de los proyectos en riesgo para quien no ve costos: salud, más atraso, más riesgo y nombre (desempate fijo). */
+const compareRiskWithoutCost = (a: SuiteRow, b: SuiteRow): number =>
+    (HEALTH_RANK[String(a.project_health_status)] ?? 3) - (HEALTH_RANK[String(b.project_health_status)] ?? 3)
+    || Number(b.schedule_variance_days) - Number(a.schedule_variance_days)
+    || (SEVERITY_RANK[String(a.risk_level)] ?? 4) - (SEVERITY_RANK[String(b.risk_level)] ?? 4)
+    || String(a.name).localeCompare(String(b.name));
+
+/** Diagnóstico de un proyecto en alerta; el monto del sobrecosto solo se escribe para quien puede ver costos. */
+const describeCriticalReason = (costVarianceCLP: number, schedVar: number, riskLevel: string, showAmounts: boolean): string => {
+    const overrun = showAmounts ? `Sobrecosto de $${Math.round(costVarianceCLP).toLocaleString('es-CL')}` : 'Sobrecosto';
+    if (costVarianceCLP > 0 && schedVar > 5) return `${overrun} y retraso de ${schedVar} días`;
+    if (costVarianceCLP > 0) return `${overrun} sobre presupuesto`;
+    if (schedVar > 5) return `Retraso crítico de ${schedVar} días frente a la fecha comprometida`;
+    if (riskLevel === 'critical' || riskLevel === 'high') return `Alerta de riesgo operativo ${riskLevel.toUpperCase()}`;
+    return 'En curso regular';
+};
 
 export class PMOController {
     // GET /api/pmo/dashboard - Main PMO dashboard data
@@ -127,13 +258,13 @@ export class PMOController {
                 ORDER BY planned_fte DESC, u.full_name
             `);
 
-            res.json({
+            res.json(stripBudgetFields({
                 projects,
                 overallMetrics,
                 upcomingMilestones,
                 teamWorkload,
                 teamCapacity
-            });
+            }, req.user?.role));
         } catch (error) {
             logger.error('Get PMO dashboard error:', error);
             res.status(500).json({ error: 'Failed to get PMO dashboard data' });
@@ -314,7 +445,7 @@ export class PMOController {
             };
 
             logger.info(`Gantt data successfully loaded for project ${id}`);
-            res.json(result);
+            res.json(stripBudgetFields(result, req.user?.role));
         } catch (error) {
             logger.error('Get project Gantt error:', error);
             res.status(500).json({ error: 'Failed to get project Gantt data' });
@@ -399,19 +530,28 @@ export class PMOController {
     updateMilestone = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
         try {
             const { id } = req.params;
-            const updates = req.body;
 
-            const existing = await db.get(`SELECT * FROM project_milestones WHERE id = ?`, [id]);
-            if (!existing) {
-                res.status(404).json({ error: 'Milestone not found' });
+            // Los nombres de columna salen siempre de la lista blanca, nunca de las claves que envía el cliente
+            const selection = selectWritableColumns(req.body, MILESTONE_UPDATABLE_COLUMNS, MILESTONE_IGNORED_KEYS);
+            if ('error' in selection) {
+                res.status(400).json({ error: selection.error });
+                return;
+            }
+            const { columns } = selection;
+            if (columns.length === 0) {
+                res.status(400).json({ error: 'No hay campos para actualizar' });
                 return;
             }
 
-            // Remove fields that shouldn't be updated directly
-            delete updates.id;
-            delete updates.created_by;
-            delete updates.created_at;
-            
+            const existing = await db.get(`SELECT * FROM project_milestones WHERE id = ?`, [id]);
+            if (!existing) {
+                res.status(404).json({ error: 'Hito no encontrado' });
+                return;
+            }
+
+            const updates: Record<string, unknown> = {};
+            columns.forEach((column, index) => { updates[column] = selection.values[index]; });
+
             // Map frontend responsibility values to database values
             console.log('🔍 Original responsibility value:', updates.responsibility);
             if (updates.responsibility === 'cliente' || updates.responsibility === 'client') {
@@ -427,27 +567,14 @@ export class PMOController {
                 console.log('⚠️ Unmapped responsibility value:', updates.responsibility);
             }
 
-            const fields = [];
-            const values = [];
-
-            for (const [key, value] of Object.entries(updates)) {
-                fields.push(`${key} = ?`);
-                values.push(value);
-            }
-
-            if (fields.length === 0) {
-                res.status(400).json({ error: 'No fields to update' });
-                return;
-            }
-
+            const fields = columns.map(column => `${column} = ?`);
             fields.push('updated_at = datetime(\'now\')');
-            values.push(id);
 
             await db.run(`
-                UPDATE project_milestones 
-                SET ${fields.join(', ')} 
+                UPDATE project_milestones
+                SET ${fields.join(', ')}
                 WHERE id = ?
-            `, values);
+            `, [...columns.map(column => updates[column]), id]);
 
             const updatedMilestone = await db.get(`
                 SELECT m.*, u.full_name as responsible_name, p.name as project_name
@@ -472,10 +599,11 @@ export class PMOController {
             }
 
             logger.info(`Milestone updated: ${id}`);
-            res.json(updatedMilestone);
+            // Solo columnas explícitas: nada de lo que posee el servidor (created_by, created_at, updated_at, línea base)
+            res.json(Object.fromEntries(MILESTONE_RESPONSE_KEYS.map(key => [key, updatedMilestone[key]])));
         } catch (error) {
             logger.error('Update milestone error:', error);
-            res.status(500).json({ error: 'Failed to update milestone' });
+            res.status(500).json({ error: 'No se pudo actualizar el hito' });
         }
     };
 
@@ -754,62 +882,48 @@ export class PMOController {
     updateProjectMetrics = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
         try {
             const { id } = req.params;
-            const metrics = req.body;
+
+            // Los nombres de columna salen siempre de la lista blanca, nunca de las claves que envía el cliente
+            const selection = selectWritableColumns(req.body, PMO_METRICS_COLUMNS);
+            if ('error' in selection) {
+                res.status(400).json({ error: selection.error });
+                return;
+            }
+            const { columns, values } = selection;
+            if (columns.length === 0) {
+                res.status(400).json({ error: 'No hay campos para actualizar' });
+                return;
+            }
 
             // Check if metrics exist for this project
             const existing = await db.get('SELECT id FROM project_pmo_metrics WHERE project_id = ?', [id]);
 
             if (existing) {
                 // Update existing metrics
-                const fields = [];
-                const values = [];
-
-                for (const [key, value] of Object.entries(metrics)) {
-                    if (key !== 'project_id') {
-                        fields.push(`${key} = ?`);
-                        values.push(value);
-                    }
-                }
-
+                const fields = columns.map(column => `${column} = ?`);
                 fields.push('last_updated = datetime(\'now\')');
                 fields.push('updated_by = ?');
-                values.push(req.user?.id);
-                values.push(id);
 
                 await db.run(`
                     UPDATE project_pmo_metrics 
                     SET ${fields.join(', ')} 
                     WHERE project_id = ?
-                `, values);
+                `, [...values, req.user?.id, id]);
             } else {
                 // Create new metrics
-                const columns = ['project_id', 'updated_by', 'last_updated'];
-                const placeholders = ['?', '?', 'datetime(\'now\')'];
-                const insertValues = [id, req.user?.id];
-
-                for (const [key, value] of Object.entries(metrics)) {
-                    if (key !== 'project_id') {
-                        columns.push(key);
-                        placeholders.push('?');
-                        insertValues.push(value as string | number);
-                    }
-                }
-
                 await db.run(`
-                    INSERT INTO project_pmo_metrics (${columns.join(', ')})
-                    VALUES (${placeholders.join(', ')})
-                `, insertValues);
+                    INSERT INTO project_pmo_metrics (project_id, updated_by, last_updated${columns.map(column => `, ${column}`).join('')})
+                    VALUES (?, ?, datetime('now')${columns.map(() => ', ?').join('')})
+                `, [id, req.user?.id, ...values]);
             }
 
-            const updatedMetrics = await db.get(`
-                SELECT * FROM project_pmo_metrics WHERE project_id = ?
-            `, [id]);
+            const updatedMetrics = await db.get(PMO_METRICS_SELECT, [id]);
 
             logger.info(`PMO metrics updated for project: ${id}`);
-            res.json(updatedMetrics);
+            res.json(stripBudgetFields(updatedMetrics, req.user?.role));
         } catch (error) {
             logger.error('Update project metrics error:', error);
-            res.status(500).json({ error: 'Failed to update project metrics' });
+            res.status(500).json({ error: 'No se pudieron actualizar las métricas del proyecto' });
         }
     };
 
@@ -1058,7 +1172,7 @@ export class PMOController {
                     END
             `);
 
-            res.json({
+            res.json(stripBudgetFields({
                 executiveSummary,
                 trendAnalysis,
                 budgetAnalysis,
@@ -1069,7 +1183,7 @@ export class PMOController {
                 resourceUtilization,
                 satisfactionTrends,
                 riskDistribution
-            });
+            }, req.user?.role));
         } catch (error) {
             logger.error('Get PMO analytics error:', error);
             res.status(500).json({ error: 'Failed to get PMO analytics' });
@@ -1251,7 +1365,10 @@ export class PMOController {
 
             logger.info(`PMO metrics retrieved for project: ${projectMetrics.name} (ID: ${projectId})`);
 
-            res.json({
+            // El riesgo de sobrecosto dice cuánto se pasó el presupuesto: solo lo ve team_lead
+            const visibleRisks = canSeeFinancials(req.user?.role) ? risks : risks.filter((r: any) => r.risk_type !== 'budget_overrun');
+
+            res.json(stripBudgetFields({
                 project: projectMetrics,
                 milestones: {
                     total: milestones.length,
@@ -1261,15 +1378,469 @@ export class PMOController {
                     ).length,
                     list: milestones
                 },
-                risks: risks,
+                risks: visibleRisks,
                 team: teamMetrics,
                 kpis: kpis,
-                alerts: risks.filter((r: any) => r.severity === 'critical' || r.severity === 'high')
-            });
+                alerts: visibleRisks.filter((r: any) => r.severity === 'critical' || r.severity === 'high')
+            }, req.user?.role));
 
         } catch (error) {
             logger.error(`Get project PMO metrics error for project ${req.params.id}:`, error);
             res.status(500).json({ error: 'Failed to get project PMO metrics' });
         }
     };
+
+    // GET /api/pmo/executive-suite - Datos integrados para Gerente General, Comercial y Controller
+    getPMOExecutiveSuite = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+        try {
+            await billingService.evaluateTriggers();
+            await billingService.evaluateOverdue();
+
+            const canSeeCosts = canSeeFinancials(req.user?.role);
+
+            // 1. Proyectos y avance PMO manual (project_pmo_metrics solo aporta avance, atraso, riesgo y satisfacción;
+            // los montos salen siempre de financeService). Solo cuentan los de venta realizada, como en la cartera.
+            const projects = (await db.query(`
+                SELECT 
+                    p.id, p.name, p.status, p.commercial_stage, p.priority, p.end_date, p.start_date,
+                    c.id as client_id, c.name as client_name,
+                    u.id as assigned_to_id, u.full_name as assigned_to_name,
+                    pm.completion_percentage, pm.schedule_variance_days, pm.risk_level,
+                    pm.client_satisfaction_score
+                FROM projects p
+                LEFT JOIN project_pmo_metrics pm ON p.id = pm.project_id
+                LEFT JOIN clients c ON p.client_id = c.id
+                LEFT JOIN users u ON p.assigned_to = u.id
+                ORDER BY p.name ASC
+            `)).filter(isRealizedSale);
+
+            // 2. Financials calculados en vivo por financeService
+            const financialsMap = new Map<number, ProjectFinancials | null>();
+            await Promise.all(
+                projects.map(async (p: any) => {
+                    try {
+                        financialsMap.set(p.id, await financeService.calculateProjectFinancials(p.id));
+                    } catch (error) {
+                        logger.error(`PMO Executive Suite: no se pudieron calcular las finanzas del proyecto ${p.id}:`, error);
+                        financialsMap.set(p.id, null);
+                    }
+                })
+            );
+
+            // 3. Billing Dashboard para datos de caja y facturación
+            const billingDashboard = await billingService.getDashboard();
+
+            // -----------------------------------------------------------------
+            // PERSPECTIVA 1: GERENTE GENERAL (CEO / P&L Consolidado)
+            // -----------------------------------------------------------------
+            let total_sold_clp = 0;
+            let total_real_cost_clp = 0;
+            let healthy_count = 0;
+            let warning_count = 0;
+            let critical_count = 0;
+
+            const analyzedProjects = projects.map((p: any) => {
+                const fin = financialsMap.get(p.id);
+                const salePrice = fin?.sale_price ?? 0;
+                const realCost = fin?.real_cost ?? 0;
+                const budgetedCost = fin?.planned_cost ?? 0;
+                const costVarianceCLP = Math.max(0, realCost - budgetedCost);
+                const schedVar = Number(p.schedule_variance_days || 0);
+                const riskLevel = p.risk_level || 'low';
+
+                const isCritical = schedVar > 5 || (budgetedCost > 0 && (realCost / budgetedCost) > 1.2) || riskLevel === 'critical';
+                const isWarning = !isCritical && (schedVar > 2 || (budgetedCost > 0 && (realCost / budgetedCost) > 1.1) || riskLevel === 'high');
+                const healthStatus = isCritical ? 'critical' : isWarning ? 'warning' : 'healthy';
+
+                if (healthStatus === 'critical') critical_count++;
+                else if (healthStatus === 'warning') warning_count++;
+                else healthy_count++;
+
+                total_sold_clp += salePrice;
+                total_real_cost_clp += realCost;
+
+                const daysToDeadline = p.end_date
+                    ? Math.round((new Date(p.end_date).getTime() - Date.now()) / (1000 * 3600 * 24))
+                    : null;
+
+                return {
+                    id: p.id,
+                    name: p.name,
+                    client_id: p.client_id,
+                    client_name: p.client_name || 'Sin cliente',
+                    assigned_to_name: p.assigned_to_name || 'Sin asignar',
+                    project_health_status: healthStatus,
+                    schedule_variance_days: schedVar,
+                    cost_variance_clp: costVarianceCLP,
+                    real_cost_clp: realCost,
+                    budgeted_cost_clp: budgetedCost,
+                    sale_price_clp: salePrice,
+                    progress_pct: Number(p.completion_percentage || 0),
+                    days_to_deadline: daysToDeadline,
+                    critical_reason: describeCriticalReason(costVarianceCLP, schedVar, riskLevel, canSeeCosts),
+                    risk_level: riskLevel,
+                    satisfaction_score: p.client_satisfaction_score
+                };
+            });
+
+            const total_gross_profit_clp = total_sold_clp - total_real_cost_clp;
+            const avg_margin_pct = total_sold_clp > 0
+                ? Math.round(((total_gross_profit_clp / total_sold_clp) * 100) * 10) / 10
+                : 0;
+
+            // Quien no ve costos recibe el orden sin sobrecosto: por salud, atraso y riesgo (el costo se podría despejar del orden)
+            const top_risk_projects = analyzedProjects
+                .filter(p => p.project_health_status !== 'healthy')
+                .sort(canSeeCosts
+                    ? (a, b) => (b.cost_variance_clp + b.schedule_variance_days * 100000) - (a.cost_variance_clp + a.schedule_variance_days * 100000)
+                    : compareRiskWithoutCost)
+                .slice(0, 5);
+
+            // Capacidad y utilización
+            const teamCapacityRows = await db.query(`
+                SELECT u.id, u.full_name, u.role,
+                       ROUND(COALESCE(SUM(CASE WHEN p.id IS NOT NULL THEN pa.allocation_percentage ELSE 0 END), 0) / 100.0, 2) AS planned_fte
+                FROM users u
+                LEFT JOIN project_assignments pa ON pa.user_id = u.id AND pa.is_active = 1
+                LEFT JOIN projects p ON p.id = pa.project_id AND p.status IN ('active', 'on_hold')
+                WHERE u.is_active = 1 AND u.role IN ('rpa_developer', 'rpa_operations', 'team_lead')
+                GROUP BY u.id, u.full_name, u.role
+            `);
+
+            const total_planned_fte = teamCapacityRows.reduce((acc: number, r: any) => acc + Number(r.planned_fte || 0), 0);
+            const overutilized_count = teamCapacityRows.filter((r: any) => Number(r.planned_fte) > 1.05).length;
+            const underutilized_count = teamCapacityRows.filter((r: any) => Number(r.planned_fte) < 0.8).length;
+            const optimal_count = teamCapacityRows.length - overutilized_count - underutilized_count;
+
+            // -----------------------------------------------------------------
+            // PERSPECTIVA 2: GERENTE COMERCIAL (Revenue, Hitos Cobrables & Margen)
+            // -----------------------------------------------------------------
+            const billableMilestoneRows = await db.query(`
+                SELECT 
+                    pm.id as milestone_id, pm.name as milestone_name, pm.amount, pm.currency,
+                    pm.status, pm.planned_date, pm.billable_at, pm.trigger_type,
+                    p.id as project_id, p.name as project_name,
+                    c.name as client_name,
+                    mile.name as source_milestone_name,
+                    CAST(julianday('now') - julianday(COALESCE(pm.billable_at, pm.planned_date, pm.created_at)) AS INTEGER) as days_since_completed
+                FROM payment_milestones pm
+                JOIN projects p ON p.id = pm.project_id
+                LEFT JOIN clients c ON p.client_id = c.id
+                LEFT JOIN project_milestones mile ON mile.id = pm.project_milestone_id
+                WHERE pm.status = 'billable'
+                ORDER BY days_since_completed DESC, pm.amount DESC
+            `);
+
+            let total_unlocked_revenue_clp = 0;
+            const ready_to_invoice = await Promise.all(
+                billableMilestoneRows.map(async (row: any) => {
+                    const amountCLP = row.currency === 'CLP'
+                        ? Number(row.amount)
+                        : await financeService.toCLP(Number(row.amount), row.currency as Currency);
+                    total_unlocked_revenue_clp += amountCLP;
+                    return {
+                        ...row,
+                        amount_clp: Math.round(amountCLP),
+                        days_since_completed: Math.max(0, Number(row.days_since_completed || 0))
+                    };
+                })
+            );
+
+            // Comparativa de Cotización (Margen Vendido vs Real)
+            const approvedQuotes = await db.query(`
+                SELECT pq.*, p.name as project_name, c.name as client_name
+                FROM project_quotes pq
+                JOIN projects p ON p.id = pq.project_id
+                LEFT JOIN clients c ON p.client_id = c.id
+                WHERE pq.status = 'approved'
+                ORDER BY pq.created_at DESC
+            `);
+
+            const margin_variance = approvedQuotes.filter((q: any) => financialsMap.has(q.project_id)).map((q: any) => {
+                const fin = financialsMap.get(q.project_id);
+                const quotedMargin = Number(q.margin_percent || 0);
+                const realMargin = fin ? Number(fin.real_margin_percentage || 0) : 0;
+                const quotedHours = Number(q.hours || 0);
+                const realHours = fin ? Number(fin.real_hours || 0) : 0;
+                const leakage = quotedMargin - realMargin;
+
+                return {
+                    project_id: q.project_id,
+                    project_name: q.project_name,
+                    client_name: q.client_name || 'Sin cliente',
+                    quoted_margin_pct: quotedMargin,
+                    real_margin_pct: realMargin,
+                    margin_leakage_pct: Math.round(leakage * 10) / 10,
+                    quoted_hours: quotedHours,
+                    real_hours: realHours,
+                    hours_exceeded: Math.max(0, realHours - quotedHours),
+                    quoted_amount_clp: Number(q.amount || 0),
+                    real_cost_clp: fin ? fin.real_cost : 0,
+                    pricing_model: q.pricing_model
+                };
+            });
+
+            // Scope Creep Alerts (proyectos con exceso de horas sobre lo cotizado/estimado)
+            const scope_creep_alerts = margin_variance
+                .filter(m => m.hours_exceeded > 0)
+                .map(m => ({
+                    project_id: m.project_id,
+                    project_name: m.project_name,
+                    client_name: m.client_name,
+                    quoted_hours: m.quoted_hours,
+                    real_hours: m.real_hours,
+                    overrun_hours: m.hours_exceeded,
+                    overrun_cost_clp: Math.round(m.hours_exceeded * 35000), // Promedio estimado HH
+                    severity: (m.hours_exceeded > 20 || (canSeeCosts && m.margin_leakage_pct > 15)) ? 'critical' : 'warning'
+                }));
+
+            // Scorecard por Cliente
+            const clientScorecardMap = new Map<number, any>();
+            analyzedProjects.forEach(p => {
+                if (!p.client_id) return;
+                const existing = clientScorecardMap.get(p.client_id) || {
+                    client_id: p.client_id,
+                    client_name: p.client_name,
+                    active_projects: 0,
+                    total_sold_clp: 0,
+                    satisfaction_sum: 0,
+                    satisfaction_count: 0,
+                    has_critical: false
+                };
+                existing.active_projects++;
+                existing.total_sold_clp += p.sale_price_clp;
+                if (p.satisfaction_score) {
+                    existing.satisfaction_sum += p.satisfaction_score;
+                    existing.satisfaction_count++;
+                }
+                if (p.project_health_status === 'critical') existing.has_critical = true;
+                clientScorecardMap.set(p.client_id, existing);
+            });
+
+            const client_scorecards = Array.from(clientScorecardMap.values()).map(c => ({
+                client_id: c.client_id,
+                client_name: c.client_name,
+                active_projects: c.active_projects,
+                total_sold_clp: c.total_sold_clp,
+                avg_satisfaction: c.satisfaction_count > 0 ? Math.round((c.satisfaction_sum / c.satisfaction_count) * 10) / 10 : null,
+                health: c.has_critical ? 'critical' : 'healthy'
+            }));
+
+            // -----------------------------------------------------------------
+            // PERSPECTIVA 3: CONTROLLER / CONTROL DE GESTIÓN (Triple Conciliación & Imputaciones)
+            // -----------------------------------------------------------------
+            // Mismo facturado y cobrado que la cartera: sin duplicar facturas con varios pagos, sin borradores, en CLP
+            const billing = await portfolioService.getBillingByProject(projects.map((p: any) => Number(p.id)));
+
+            const triple_conciliation = analyzedProjects.map(p => {
+                const inv = { total_invoiced: billing.invoiced.get(p.id) ?? 0, total_paid: billing.collected.get(p.id) ?? 0 };
+                const physical_pct = p.progress_pct;
+                const cost_consumed_pct = p.budgeted_cost_clp > 0
+                    ? Math.round((p.real_cost_clp / p.budgeted_cost_clp) * 100)
+                    : 0;
+                const billed_pct = p.sale_price_clp > 0
+                    ? Math.round((inv.total_invoiced / p.sale_price_clp) * 100)
+                    : 0;
+
+                // EVM (Earned Value Management)
+                const ev = (physical_pct / 100) * p.sale_price_clp;
+                const ac = p.real_cost_clp;
+                const cpi = ac > 0 ? Math.round((ev / ac) * 100) / 100 : 1.0;
+
+                let deviation_flag: 'healthy' | 'cost_overrun' | 'unbilled_work' | 'critical_desynchronization' = 'healthy';
+                const hasCostOverrun = cost_consumed_pct > physical_pct + 15;
+                const hasUnbilledWork = physical_pct > billed_pct + 25;
+
+                if (hasCostOverrun && hasUnbilledWork) deviation_flag = 'critical_desynchronization';
+                else if (hasCostOverrun) deviation_flag = 'cost_overrun';
+                else if (hasUnbilledWork) deviation_flag = 'unbilled_work';
+
+                return {
+                    project_id: p.id,
+                    project_name: p.name,
+                    client_name: p.client_name,
+                    physical_progress_pct: physical_pct,
+                    cost_consumed_pct,
+                    billed_pct,
+                    cpi,
+                    deviation_flag,
+                    sale_price_clp: p.sale_price_clp,
+                    budgeted_cost_clp: p.budgeted_cost_clp,
+                    real_cost_clp: p.real_cost_clp,
+                    invoiced_clp: inv.total_invoiced,
+                    paid_clp: inv.total_paid
+                };
+            });
+
+            // Auditoría de Imputaciones (Timesheet Hygiene)
+            const activeTeamMembers = await db.query(`
+                SELECT id, full_name, role 
+                FROM users 
+                WHERE is_active = 1 AND role IN ('rpa_developer', 'rpa_operations', 'team_lead')
+            `);
+
+            const users_with_missing_days: any[] = [];
+            for (const member of activeTeamMembers) {
+                const reminders = await timesheetService.getPendingReminders(member.id);
+                if (reminders.missing_dates && reminders.missing_dates.length > 0) {
+                    users_with_missing_days.push({
+                        user_id: member.id,
+                        user_name: member.full_name,
+                        user_role: member.role,
+                        missing_days_count: reminders.missing_dates.length,
+                        missing_dates: reminders.missing_dates
+                    });
+                }
+            }
+
+            const pendingApprovalsRaw = await timesheetService.getPendingApprovals();
+            const pending_approval_periods = pendingApprovalsRaw.map(r => ({
+                period_id: r.id,
+                user_name: r.user_name,
+                week_start: r.period_start,
+                total_hours: r.total_hours,
+                submitted_at: r.submitted_at
+            }));
+
+            // Ratio de horas facturables en los últimos 30 días
+            const hoursStats = await db.get(`
+                SELECT 
+                    COALESCE(SUM(hours), 0) as total_hours,
+                    COALESCE(SUM(CASE WHEN is_billable = 1 THEN hours ELSE 0 END), 0) as billable_hours
+                FROM time_entries
+                WHERE date >= date('now', '-30 days')
+            `);
+            const totalHours30d = Number(hoursStats?.total_hours || 0);
+            const billableHours30d = Number(hoursStats?.billable_hours || 0);
+            const internalHours30d = Math.max(0, totalHours30d - billableHours30d);
+            const billableRatio30d = totalHours30d > 0
+                ? Math.round((billableHours30d / totalHours30d) * 1000) / 10
+                : 100;
+
+            // Desglose por Centro de Costos
+            const costCentersRaw = await db.query(`
+                SELECT cc.*,
+                       COUNT(DISTINCT pcca.project_id) as allocated_projects_count,
+                       COALESCE(SUM(pcca.amount), 0) as total_allocated_amount
+                FROM cost_centers cc
+                LEFT JOIN project_cost_center_allocations pcca ON pcca.cost_center_id = cc.id
+                WHERE cc.is_active = 1
+                GROUP BY cc.id
+                ORDER BY cc.country, cc.name
+            `);
+
+            const cost_centers_summary = costCentersRaw.map((cc: any) => ({
+                cost_center_id: cc.id,
+                code: cc.code,
+                name: cc.name,
+                country: cc.country,
+                is_rpa: Boolean(cc.is_rpa),
+                allocated_projects_count: Number(cc.allocated_projects_count || 0),
+                total_budget_clp: Number(cc.total_allocated_amount || 0)
+            }));
+
+            // Aging de Cartera (Cobranza y Facturación)
+            const unpaidInvoices = await db.query(`
+                SELECT i.*, p.name as project_name, c.name as client_name,
+                       COALESCE((SELECT SUM(amount) FROM payments WHERE invoice_id = i.id), 0) as amount_paid,
+                       CAST(julianday('now') - julianday(i.due_date) AS INTEGER) as days_overdue
+                FROM invoices i
+                JOIN projects p ON p.id = i.project_id
+                LEFT JOIN clients c ON p.client_id = c.id
+                WHERE i.status IN ('issued', 'partially_paid', 'overdue')
+                ORDER BY days_overdue DESC
+            `);
+
+            let current_clp = 0;
+            let overdue_30_clp = 0;
+            let overdue_60_clp = 0;
+
+            for (const inv of unpaidInvoices) {
+                const balance = Number(inv.amount || 0) - Number(inv.amount_paid || 0);
+                const balanceCLP = inv.currency === 'CLP'
+                    ? balance
+                    : await financeService.toCLP(balance, inv.currency as Currency);
+                const days = Number(inv.days_overdue || 0);
+
+                if (days <= 0) current_clp += balanceCLP;
+                else if (days <= 30) overdue_30_clp += balanceCLP;
+                else overdue_60_clp += balanceCLP;
+            }
+
+            const total_overdue_clp = overdue_30_clp + overdue_60_clp;
+
+            const suite: ExecutiveSuiteResponse = {
+                general_manager: {
+                    consolidated_pnl: {
+                        total_sold_clp: Math.round(total_sold_clp),
+                        total_real_cost_clp: Math.round(total_real_cost_clp),
+                        total_gross_profit_clp: Math.round(total_gross_profit_clp),
+                        avg_margin_pct,
+                        active_projects_count: projects.filter(p => p.status === 'active').length,
+                        total_projects_count: projects.length,
+                        billable_hours_ratio: billableRatio30d
+                    },
+                    cashflow_forecast: billingDashboard.cashflow_projection || [],
+                    portfolio_health_summary: {
+                        healthy: healthy_count,
+                        warning: warning_count,
+                        critical: critical_count
+                    },
+                    top_risk_projects,
+                    team_utilization_summary: {
+                        total_planned_fte: Math.round(total_planned_fte * 100) / 100,
+                        total_developers: teamCapacityRows.length,
+                        overutilized_count,
+                        optimal_count,
+                        underutilized_count
+                    }
+                },
+                commercial: {
+                    ready_to_invoice,
+                    total_unlocked_revenue_clp: Math.round(total_unlocked_revenue_clp),
+                    margin_variance,
+                    scope_creep_alerts,
+                    client_scorecards
+                },
+                controller: {
+                    triple_conciliation,
+                    imputations_audit: {
+                        users_with_missing_days,
+                        pending_approval_periods,
+                        billable_breakdown: {
+                            total_real_hours: totalHours30d,
+                            total_billable_hours: billableHours30d,
+                            total_internal_hours: internalHours30d,
+                            billable_pct: billableRatio30d
+                        }
+                    },
+                    cost_centers_summary,
+                    aging_portfolio: {
+                        current_clp: Math.round(current_clp),
+                        overdue_30_clp: Math.round(overdue_30_clp),
+                        overdue_60_clp: Math.round(overdue_60_clp),
+                        total_overdue_clp: Math.round(total_overdue_clp),
+                        overdue_invoices: unpaidInvoices.map((inv: any) => ({
+                            id: inv.id,
+                            invoice_number: inv.invoice_number,
+                            project_name: inv.project_name,
+                            client_name: inv.client_name,
+                            amount: inv.amount,
+                            amount_paid: inv.amount_paid,
+                            currency: inv.currency,
+                            due_date: inv.due_date,
+                            days_overdue: Math.max(0, Number(inv.days_overdue || 0))
+                        }))
+                    }
+                }
+            };
+
+            res.json(stripFinancials(suite, req.user?.role));
+
+        } catch (error) {
+            logger.error('Get PMO Executive Suite error:', error);
+            res.status(500).json({ error: 'Failed to retrieve PMO executive suite data' });
+        }
+    };
 }
+

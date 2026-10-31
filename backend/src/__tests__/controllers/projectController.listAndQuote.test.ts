@@ -133,4 +133,22 @@ describe('ProjectController - listado y creación desde cotización (SQLite real
             { name: 'Go-live', planned_date: '2026-12-15' }
         ]);
     });
+
+    it("createProjectFromQuote deja el proyecto con commercial_stage 'approved' y client_approved_at no nulo", async () => {
+        const res = mockRes();
+        await controller.createProjectFromQuote(makeReq({ id: users.lead, role: 'team_lead' }, {
+            quote_data: {
+                project_name: 'Cotización aprobada',
+                description: 'Automatización contable',
+                client_name: 'Cliente Z'
+            }
+        }), res);
+
+        expect(res.status).toHaveBeenCalledWith(201);
+        const projectId = (res.json as jest.Mock).mock.calls[0][0].project.id;
+
+        const project = await testDb.get('SELECT status, commercial_stage, client_approved_at FROM projects WHERE id = ?', [projectId]);
+        expect(project).toMatchObject({ status: 'active', commercial_stage: 'approved' });
+        expect(project.client_approved_at).not.toBeNull();
+    });
 });

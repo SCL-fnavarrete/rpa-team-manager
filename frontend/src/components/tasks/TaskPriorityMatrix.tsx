@@ -286,13 +286,13 @@ const TaskPriorityMatrix: React.FC<TaskPriorityMatrixProps> = ({ tasks }) => {
               <Space size="small">
                 <Tag 
                   color={getPriorityColor(task.priority)}
-                  style={{ fontSize: '9px', padding: '1px 4px' }}
+                  style={{ fontSize: '11px', padding: '1px 4px' }}
                 >
                   {displayLabel(task.priority)}
                 </Tag>
                 <Tag 
                   color={getTaskStatusColor(task.status)}
-                  style={{ fontSize: '9px', padding: '1px 4px' }}
+                  style={{ fontSize: '11px', padding: '1px 4px' }}
                 >
                   {displayLabel(task.status)}
                 </Tag>

@@ -4,9 +4,13 @@ import { db } from '../database/database';
 import { notificationService } from '../services/notificationService';
 import { financeService, Currency } from '../services/financeService';
 import { activityLogService } from '../services/activityLogService';
+import { closureReportService } from '../services/closureReportService';
+import { generateClosureReport } from '../services/pdfService';
+import { logger } from '../utils/logger';
 
 const canManage = (role?: string) => role === 'team_lead' || role === 'rpa_operations';
 const canSeeFinancials = (role?: string) => role === 'team_lead';
+const canSeeCommercialQuotes = (role?: string) => role === 'team_lead' || role === 'rpa_operations';
 
 export class CommercialController {
   private async projectExists(projectId: number): Promise<boolean> {
@@ -79,9 +83,11 @@ export class CommercialController {
       WHERE q.project_id = ? ORDER BY q.version DESC`, [projectId]);
     const data = rows.map((row: any) => {
       const safe = { ...row };
-      if (!canSeeFinancials(req.user?.role)) {
+      if (!canSeeCommercialQuotes(req.user?.role)) {
         delete safe.amount;
         delete safe.hourly_rate;
+      }
+      if (!canSeeFinancials(req.user?.role)) {
         delete safe.estimated_cost;
         delete safe.margin_percent;
       }
@@ -121,8 +127,10 @@ export class CommercialController {
     await activityLogService.logActivity(req.user?.id, 'project', projectId, 'quote_version_created', null, { quote_id: result.id, version: next.version, amount: amountNumber, currency, status: created.status });
     if (!canSeeFinancials(req.user?.role)) {
       const safe = { ...created };
-      delete safe.amount;
-      delete safe.hourly_rate;
+      if (!canSeeCommercialQuotes(req.user?.role)) {
+        delete safe.amount;
+        delete safe.hourly_rate;
+      }
       delete safe.estimated_cost;
       delete safe.margin_percent;
       res.status(201).json({ data: safe });
@@ -150,8 +158,10 @@ export class CommercialController {
       const financials = await db.get('SELECT id FROM project_financials WHERE project_id = ?', [quote.project_id]);
       const costCLP = quote.estimated_cost == null ? 0 : await financeService.toCLP(Number(quote.estimated_cost), quote.currency as Currency);
       const updates = { sale_price: quote.amount, sale_price_currency: quote.currency, budgeted_hours: quote.hours ?? 0, budgeted_cost: costCLP };
-      if (financials) await db.run(`UPDATE project_financials SET sale_price = ?, sale_price_currency = ?, budgeted_hours = ?, budgeted_cost = ?, updated_at = datetime('now') WHERE project_id = ?`, [updates.sale_price, updates.sale_price_currency, updates.budgeted_hours, updates.budgeted_cost, quote.project_id]);
-      else await db.run(`INSERT INTO project_financials (project_id, sale_price, sale_price_currency, budgeted_hours, budgeted_cost) VALUES (?, ?, ?, ?, ?)`, [quote.project_id, updates.sale_price, updates.sale_price_currency, updates.budgeted_hours, updates.budgeted_cost]);
+      // El costo se guarda ya convertido a pesos, así que la columna de su moneda debe decir CLP: si conservara
+      // 'UF'/'USD' (p. ej. de una versión anterior) financeService lo convertiría por segunda vez.
+      if (financials) await db.run(`UPDATE project_financials SET sale_price = ?, sale_price_currency = ?, budgeted_hours = ?, budgeted_cost = ?, budgeted_cost_currency = 'CLP', updated_at = datetime('now') WHERE project_id = ?`, [updates.sale_price, updates.sale_price_currency, updates.budgeted_hours, updates.budgeted_cost, quote.project_id]);
+      else await db.run(`INSERT INTO project_financials (project_id, sale_price, sale_price_currency, budgeted_hours, budgeted_cost, budgeted_cost_currency) VALUES (?, ?, ?, ?, ?, 'CLP')`, [quote.project_id, updates.sale_price, updates.sale_price_currency, updates.budgeted_hours, updates.budgeted_cost]);
       await db.commit();
     } catch (error) { await db.rollback(); throw error; }
     await activityLogService.logActivity(userId, 'quote', quoteId, 'internally_approved', { status: quote.status }, { status: 'approved', approved_by: userId, approved_at: new Date().toISOString() });
@@ -272,6 +282,32 @@ export class CommercialController {
     await db.run(`UPDATE projects SET financial_closed_at = datetime('now'), status = 'completed', actual_end_date = COALESCE(actual_end_date, date('now')) WHERE id = ?`, [projectId]);
     await activityLogService.logActivity(req.user?.id, 'project', projectId, 'financials_closed', null, await db.get('SELECT id, financial_closed_at, status FROM projects WHERE id = ?', [projectId]));
     res.json({ data: await db.get('SELECT id, status, delivery_accepted_at, financial_closed_at FROM projects WHERE id = ?', [projectId]) });
+  };
+
+  getClosureReport = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const report = await closureReportService.getReport(Number(req.params.projectId));
+      if (!report) { res.status(404).json({ error: 'Proyecto no encontrado' }); return; }
+      res.json({ data: report });
+    } catch (error) {
+      logger.error('Get closure report error:', error);
+      res.status(500).json({ error: 'Error al generar el informe de cierre' });
+    }
+  };
+
+  getClosureReportPdf = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const projectId = Number(req.params.projectId);
+      const report = await closureReportService.getReport(projectId);
+      if (!report) { res.status(404).json({ error: 'Proyecto no encontrado' }); return; }
+      const buffer = await generateClosureReport(report);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="informe-cierre-${projectId}.pdf"`);
+      res.send(buffer);
+    } catch (error) {
+      logger.error('Get closure report PDF error:', error);
+      res.status(500).json({ error: 'Error al generar el informe de cierre' });
+    }
   };
 
   getCapacity = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
@@ -486,6 +522,98 @@ export class CommercialController {
     const rate = currency === 'CLP' ? 1 : await financeService.getExchangeRate(currency);
     if (rate <= 0) { res.status(409).json({ error: `Falta configurar el tipo de cambio vigente para ${currency}` }); return; }
     res.json({ currency, hours, cost_clp: costCLP, estimated_cost: Math.round((costCLP / rate) * 100) / 100, blended_hourly_cost_clp: Math.round(hourlyCostCLP), team: breakdown });
+  };
+
+  transitionToSupport = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      if (!canManage(req.user?.role)) {
+        res.status(403).json({ error: 'No tienes permiso para activar el paso a soporte' });
+        return;
+      }
+      const projectId = Number(req.params.projectId);
+      const project = await db.get(
+        `SELECT p.*, c.name AS client_name
+         FROM projects p
+         LEFT JOIN clients c ON c.id = p.client_id
+         WHERE p.id = ?`,
+        [projectId]
+      );
+      if (!project) {
+        res.status(404).json({ error: 'Proyecto no encontrado' });
+        return;
+      }
+
+      const companyName = String(req.body.company_name || project.client_name || project.name).trim();
+      const contractedHours = Number(req.body.contracted_hours_monthly) > 0 ? Number(req.body.contracted_hours_monthly) : 20;
+      const currency = ['CLP', 'UF', 'USD'].includes(req.body.hourly_rate_currency)
+        ? req.body.hourly_rate_currency
+        : (project.currency || 'UF');
+      const defaultRate = currency === 'CLP' ? 45000 : currency === 'USD' ? 50 : 1.2;
+      const hourlyRate = Number(req.body.hourly_rate) > 0 ? Number(req.body.hourly_rate) : defaultRate;
+      const hourlyRateExtra = Number(req.body.hourly_rate_extra) > 0 ? Number(req.body.hourly_rate_extra) : Math.round(hourlyRate * 1.25 * 100) / 100;
+
+      let company = await db.get(
+        `SELECT * FROM support_companies WHERE LOWER(TRIM(company_name)) = LOWER(TRIM(?)) LIMIT 1`,
+        [companyName]
+      );
+
+      let createdNewCompany = false;
+      if (!company) {
+        const ins = await db.run(
+          `INSERT INTO support_companies (
+            company_name, contact_person, email, phone,
+            contracted_hours_monthly, hourly_rate, hourly_rate_currency, hourly_rate_extra,
+            notes, contract_start_date, status, created_by, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, date('now'), 'active', ?, datetime('now'), datetime('now'))`,
+          [
+            companyName,
+            project.client_contact_name || 'Contacto Principal',
+            project.client_contact_email || null,
+            project.client_contact_phone || null,
+            contractedHours,
+            hourlyRate,
+            currency,
+            hourlyRateExtra,
+            `Traspasado desde proyecto #${projectId}: ${project.name}`,
+            req.user?.id ?? null
+          ]
+        );
+        company = await db.get(`SELECT * FROM support_companies WHERE id = ?`, [ins.id]);
+        createdNewCompany = true;
+      }
+
+      let rpaProcess = await db.get(
+        `SELECT * FROM support_rpa_processes WHERE company_id = ? AND LOWER(TRIM(process_name)) = LOWER(TRIM(?)) LIMIT 1`,
+        [company.id, project.name]
+      );
+      if (!rpaProcess) {
+        const procIns = await db.run(
+          `INSERT INTO support_rpa_processes (company_id, process_name, process_description) VALUES (?, ?, ?)`,
+          [company.id, project.name, project.description || `Bot RPA traspasado desde proyecto #${projectId}`]
+        );
+        rpaProcess = await db.get(`SELECT * FROM support_rpa_processes WHERE id = ?`, [procIns.id]);
+      }
+
+      await activityLogService.logActivity(req.user?.id, 'project', projectId, 'transitioned_to_support', null, {
+        support_company_id: company.id,
+        company_name: company.company_name,
+        rpa_process_id: rpaProcess?.id,
+        created_new_company: createdNewCompany
+      });
+
+      res.status(createdNewCompany ? 201 : 200).json({
+        message: 'Proyecto traspasado a Soporte y Operación exitosamente',
+        data: {
+          company,
+          process: rpaProcess,
+          rpa_process: rpaProcess,
+          created_new_company: createdNewCompany
+        }
+      });
+    } catch (error: any) {
+      logger.error('Transition to support error:', error);
+      res.status(500).json({ error: error.message || 'No se pudo traspasar el proyecto a soporte' });
+    }
   };
 }
 

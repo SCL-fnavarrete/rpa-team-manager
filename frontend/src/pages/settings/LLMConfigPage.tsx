@@ -14,7 +14,8 @@ import {
   Tag,
   Modal,
   Spin,
-  Select
+  Select,
+  theme
 } from 'antd';
 import {
   CheckCircleOutlined,
@@ -26,11 +27,19 @@ import {
   RobotOutlined,
   SettingOutlined
 } from '@ant-design/icons';
-import { useLLMConfigStore, LLMProvider } from '@/store/llmConfigStore';
+import { useLLMConfigStore, LLMProvider, DEFAULT_AVAILABLE_MODELS } from '@/store/llmConfigStore';
 import { SkillConfigModal } from '@/components/projects/SkillConfigModal';
 import { AIUsagePanel } from '@/components/settings/AIUsagePanel';
 
-const REASONING_LABELS: Record<string, string> = { none: 'Sin razonamiento', minimal: 'Mínimo', low: 'Ligero', medium: 'Medio', high: 'Alto', xhigh: 'Muy alto', max: 'Máximo' };
+const REASONING_LABELS: Record<string, string> = {
+  none: 'Sin razonamiento',
+  minimal: 'Mínimo',
+  low: 'Ligero',
+  medium: 'Medio',
+  high: 'Alto',
+  xhigh: 'Muy alto',
+  max: 'Máximo'
+};
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -41,6 +50,7 @@ interface ProviderConfig {
   description: string;
   docUrl: string;
   placeholder: string;
+  defaultModel: string;
 }
 
 const PROVIDERS: ProviderConfig[] = [
@@ -48,37 +58,42 @@ const PROVIDERS: ProviderConfig[] = [
     key: 'openai',
     name: 'OpenAI',
     icon: '🤖',
-    description: 'Modelos de OpenAI con selección de razonamiento según compatibilidad',
+    description: 'GPT-6.1, GPT-6 Luna, GPT-5.4, GPT-5, serie o3 / o4-mini, GPT-4.1 y GPT-4o con razonamiento configurable',
     docUrl: 'https://platform.openai.com/api-keys',
-    placeholder: 'sk-...'
+    placeholder: 'sk-...',
+    defaultModel: 'gpt-6.1'
   },
   {
     key: 'claude',
     name: 'Anthropic Claude',
     icon: '🧠',
-    description: 'Claude 3 Opus, Sonnet, y Haiku',
+    description: 'Claude 5.5, Claude 5, Claude 4.6 / 4.5 / 4 (Opus, Sonnet, Haiku), Claude 3.7 y Claude 3.5',
     docUrl: 'https://console.anthropic.com/settings/keys',
-    placeholder: 'sk-ant-...'
+    placeholder: 'sk-ant-...',
+    defaultModel: 'claude-5-5-sonnet'
   },
   {
     key: 'gemini',
     name: 'Google Gemini',
     icon: '✨',
-    description: 'Gemini Pro y otros modelos de Google AI',
-    docUrl: 'https://makersuite.google.com/app/apikey',
-    placeholder: 'AIza...'
+    description: 'Gemini 4 (Pro, Flash, Argon, Ultra), Gemini 3.5 / 3 (Pro, Flash, Flash-Lite), Gemini 2.5 y Gemma 4',
+    docUrl: 'https://aistudio.google.com/app/apikey',
+    placeholder: 'AIza...',
+    defaultModel: 'gemini-4-pro'
   },
   {
     key: 'deepseek',
     name: 'DeepSeek',
     icon: '🔍',
-    description: 'DeepSeek Chat y modelos de razonamiento',
+    description: 'DeepSeek V3.2 Chat, DeepSeek R1 / R2 (Reasoner) y DeepSeek Coder',
     docUrl: 'https://platform.deepseek.com/api_keys',
-    placeholder: 'sk-...'
+    placeholder: 'sk-...',
+    defaultModel: 'deepseek-chat'
   }
 ];
 
 export const LLMConfigPage: React.FC = () => {
+  const { token } = theme.useToken();
   const {
     apiKeys,
     availableModels,
@@ -106,6 +121,8 @@ export const LLMConfigPage: React.FC = () => {
     deepseek: null
   });
   const [skillModalOpen, setSkillModalOpen] = useState(false);
+
+  const modelsCatalog = availableModels || DEFAULT_AVAILABLE_MODELS;
 
   useEffect(() => {
     fetchApiKeys();
@@ -203,8 +220,11 @@ export const LLMConfigPage: React.FC = () => {
     setEditingProvider(provider);
     setApiKeyInput('');
     const existingKey = getProviderKey(provider);
-    setSelectedModel(existingKey?.selected_model || '');
-    const options = availableModels?.[provider]?.find(m => m.value === existingKey?.selected_model)?.reasoning_options;
+    const providerConfig = PROVIDERS.find(p => p.key === provider);
+    const providerModels = modelsCatalog[provider] || DEFAULT_AVAILABLE_MODELS[provider] || [];
+    const initialModel = existingKey?.selected_model || providerConfig?.defaultModel || providerModels[0]?.value || '';
+    setSelectedModel(initialModel);
+    const options = providerModels.find(m => m.value === initialModel)?.reasoning_options;
     setReasoningEffort(options ? existingKey?.reasoning_effort || 'low' : null);
     setReplaceKey(false);
     setValidationResults(prev => ({ ...prev, [provider]: null }));
@@ -228,7 +248,8 @@ export const LLMConfigPage: React.FC = () => {
     const isEditing = editingProvider === key;
     const isValidating = validating[key];
     const validationResult = validationResults[key];
-    const reasoningOptions = availableModels?.[key]?.find(m => m.value === selectedModel)?.reasoning_options;
+    const providerModels = modelsCatalog[key] || DEFAULT_AVAILABLE_MODELS[key] || [];
+    const reasoningOptions = providerModels.find(m => m.value === selectedModel)?.reasoning_options;
 
     return (
       <Col xs={24} lg={12} key={key}>
@@ -237,6 +258,7 @@ export const LLMConfigPage: React.FC = () => {
             <Space>
               <span style={{ fontSize: '24px' }}>{icon}</span>
               <span>{name}</span>
+              <Tag>{providerModels.length} modelos</Tag>
               {savedKey && savedKey.is_valid && (
                 <Tag color="success" icon={<CheckCircleOutlined />}>
                   Configurado
@@ -267,9 +289,31 @@ export const LLMConfigPage: React.FC = () => {
           }
           styles={{ body: { padding: '20px' } }}
         >
-          <Paragraph type="secondary" style={{ marginBottom: '16px' }}>
+          <Paragraph type="secondary" style={{ marginBottom: '12px' }}>
             {description}
           </Paragraph>
+
+          {!isEditing && (
+            <div style={{ marginBottom: '16px' }}>
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                Modelos disponibles ({providerModels.length}):
+              </Text>
+              <Space size={[4, 6]} wrap>
+                {providerModels.slice(0, 12).map(m => (
+                  <Tag
+                    key={m.value}
+                    color={savedKey?.selected_model === m.value ? 'blue' : undefined}
+                    style={{ margin: 0 }}
+                  >
+                    {m.label}
+                  </Tag>
+                ))}
+                {providerModels.length > 12 && (
+                  <Tag style={{ margin: 0 }}>+{providerModels.length - 12} más</Tag>
+                )}
+              </Space>
+            </div>
+          )}
 
           {savedKey && !isEditing ? (
             <div>
@@ -280,13 +324,19 @@ export const LLMConfigPage: React.FC = () => {
                 </div>
                 {savedKey.selected_model && (
                   <div>
-                    <Text strong>Modelo: </Text>
+                    <Text strong>Modelo activo: </Text>
                     <Tag color="blue">
-                      {availableModels?.[key]?.find(m => m.value === savedKey.selected_model)?.label || savedKey.selected_model}
+                      {providerModels.find(m => m.value === savedKey.selected_model)?.label || savedKey.selected_model}
                     </Tag>
                   </div>
                 )}
-                <div><Text strong>Razonamiento: </Text>{REASONING_LABELS[savedKey.reasoning_effort || ''] || (availableModels?.[key]?.find(m => m.value === savedKey.selected_model)?.reasoning_options ? 'Ligero' : 'No configurable para este modelo')}</div>
+                <div>
+                  <Text strong>Razonamiento: </Text>
+                  {REASONING_LABELS[savedKey.reasoning_effort || ''] ||
+                    (providerModels.find(m => m.value === savedKey.selected_model)?.reasoning_options
+                      ? 'Ligero'
+                      : 'No configurable para este modelo')}
+                </div>
                 {savedKey.last_validated && (
                   <div>
                     <Text type="secondary">
@@ -314,32 +364,31 @@ export const LLMConfigPage: React.FC = () => {
                     <Button type="link" onClick={() => setReplaceKey(true)}>Reemplazar clave API</Button>
                   </Form.Item>
                 ) : (
-                <Form.Item
-                  label="Clave API"
-                  help={
-                    <a href={docUrl} target="_blank" rel="noopener noreferrer">
-                      Obtener API key →
-                    </a>
-                  }
-                >
-                  <Input.Password
-                    placeholder={placeholder}
-                    value={apiKeyInput}
-                    onChange={(e) => {
-                      setApiKeyInput(e.target.value);
-                      setValidationResults(prev => ({ ...prev, [key]: null }));
-                    }}
-                    prefix={<KeyOutlined />}
-                    suffix={
-                      validationResult === true ? (
-                        <CheckCircleOutlined style={{ color: 'var(--color-success)' }} />
-                      ) : validationResult === false ? (
-                        <CloseCircleOutlined style={{ color: 'var(--color-error)' }} />
-                      ) : null
+                  <Form.Item
+                    label="Clave API"
+                    help={
+                      <a href={docUrl} target="_blank" rel="noopener noreferrer">
+                        Obtener API key →
+                      </a>
                     }
-                  />
-                </Form.Item>
-
+                  >
+                    <Input.Password
+                      placeholder={placeholder}
+                      value={apiKeyInput}
+                      onChange={(e) => {
+                        setApiKeyInput(e.target.value);
+                        setValidationResults(prev => ({ ...prev, [key]: null }));
+                      }}
+                      prefix={<KeyOutlined />}
+                      suffix={
+                        validationResult === true ? (
+                          <CheckCircleOutlined style={{ color: token.colorSuccess }} />
+                        ) : validationResult === false ? (
+                          <CloseCircleOutlined style={{ color: token.colorError }} />
+                        ) : null
+                      }
+                    />
+                  </Form.Item>
                 )}
 
                 <Form.Item
@@ -347,16 +396,30 @@ export const LLMConfigPage: React.FC = () => {
                   help="Seleccione el modelo que desea utilizar"
                 >
                   <Select
+                    showSearch
+                    optionFilterProp="label"
                     placeholder="Seleccionar modelo"
                     value={selectedModel || undefined}
-                    onChange={(value) => { setSelectedModel(value); setReasoningEffort(availableModels?.[key]?.find(m => m.value === value)?.reasoning_options ? 'low' : null); }}
-                    options={availableModels?.[key] || []}
+                    onChange={(value) => {
+                      setSelectedModel(value);
+                      setReasoningEffort(providerModels.find(m => m.value === value)?.reasoning_options ? 'low' : null);
+                    }}
+                    options={providerModels}
                     style={{ width: '100%' }}
                   />
                 </Form.Item>
 
                 <Form.Item label="Razonamiento" help="Un nivel mayor puede aumentar el consumo y el tiempo de respuesta.">
-                  {reasoningOptions ? <Select aria-label="Razonamiento" value={reasoningEffort} onChange={setReasoningEffort} options={reasoningOptions.map(value => ({ value, label: REASONING_LABELS[value] || value }))} /> : <Text type="secondary">Este modelo no admite un nivel de razonamiento configurable en esta integración.</Text>}
+                  {reasoningOptions ? (
+                    <Select
+                      aria-label="Razonamiento"
+                      value={reasoningEffort}
+                      onChange={setReasoningEffort}
+                      options={reasoningOptions.map(value => ({ value, label: REASONING_LABELS[value] || value }))}
+                    />
+                  ) : (
+                    <Text type="secondary">Este modelo no admite un nivel de razonamiento configurable en esta integración.</Text>
+                  )}
                 </Form.Item>
                 <Space>
                   <Button
@@ -427,7 +490,7 @@ export const LLMConfigPage: React.FC = () => {
       {/* Skills Configuration Section */}
       <div style={{ marginBottom: '24px' }}>
         <Title level={3}>
-          <RobotOutlined style={{ marginRight: '8px', color: '#1677ff' }} />
+          <RobotOutlined style={{ marginRight: '8px', color: token.colorPrimary }} />
           Skills de IA del Equipo RPA
         </Title>
         <Paragraph type="secondary">
@@ -443,11 +506,11 @@ export const LLMConfigPage: React.FC = () => {
                     width: 48,
                     height: 48,
                     borderRadius: 12,
-                    backgroundColor: 'var(--color-success)',
+                    backgroundColor: token.colorSuccess,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    color: '#fff',
+                    color: token.colorTextLightSolid,
                     fontSize: 24
                   }}
                 >

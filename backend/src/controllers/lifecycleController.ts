@@ -4,6 +4,26 @@ import { db } from '../database/database';
 import { logger } from '../utils/logger';
 import { financeService } from '../services/financeService';
 import { notificationService } from '../services/notificationService';
+import { selectWritableColumns } from '../utils/columnWhitelist';
+
+// Columnas que un cliente puede escribir en los PUT de esta API; el resto (id, project_id, template_id, user_id,
+// resolved_by, created_by, created_at, updated_at) las fija el servidor. Nunca se interpola una clave del cuerpo en el SQL.
+const PHASE_TEMPLATE_UPDATABLE_COLUMNS = [
+  'name', 'description', 'phase_order', 'is_billable', 'is_mandatory', 'estimated_duration_days', 'category', 'color'
+] as const;
+const PROJECT_PHASE_UPDATABLE_COLUMNS = [
+  'name', 'description', 'phase_order', 'status', 'planned_start_date', 'planned_end_date', 'estimated_hours', 'actual_start_date',
+  'actual_end_date', 'actual_hours', 'responsibility', 'blocking_reason', 'waiting_for', 'is_billable', 'budgeted_cost', 'actual_cost',
+  'client_charge', 'variance_days', 'variance_hours', 'efficiency_percentage', 'is_critical_path', 'completion_percentage'
+] as const;
+const PHASE_ACTIVITY_UPDATABLE_COLUMNS = [
+  'activity_type', 'description', 'start_datetime', 'end_datetime', 'duration_minutes', 'calculated_hours', 'is_productive',
+  'is_billable', 'is_internal', 'responsibility', 'notes', 'tags', 'has_evidence', 'evidence_description'
+] as const;
+const PROJECT_DELAY_UPDATABLE_COLUMNS = [
+  'phase_id', 'delay_type', 'description', 'responsible_party', 'contact_person', 'delay_start_date', 'delay_end_date',
+  'delay_days', 'financial_impact', 'resolution', 'has_evidence', 'evidence_notes'
+] as const;
 
 async function notifyProjectStakeholders(projectId: number, eventKey: 'project_delay_created' | 'scope_change_pending_approval', title: string, message: string, link: string, senderId?: number): Promise<void> {
   const recipients = await db.query(`
@@ -76,16 +96,16 @@ export const createPhaseTemplate = async (req: Request, res: Response) => {
 export const updatePhaseTemplate = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
 
-    const setClauses = Object.keys(updates).map(key => `${key} = ?`).join(', ');
-    const values = Object.values(updates);
+    const selection = selectWritableColumns(req.body, PHASE_TEMPLATE_UPDATABLE_COLUMNS);
+    if ('error' in selection) return res.status(400).json({ error: selection.error });
+    if (!selection.columns.length) return res.status(400).json({ error: 'No hay campos para actualizar' });
 
     await db.run(`
       UPDATE project_phase_templates
-      SET ${setClauses}
+      SET ${selection.columns.map(column => `${column} = ?`).join(', ')}
       WHERE id = ?
-    `, [...values, id]);
+    `, [...selection.values, id]);
 
     const template = await db.get('SELECT * FROM project_phase_templates WHERE id = ?', [id]);
     return res.json(template);
@@ -241,19 +261,17 @@ export const initializeProjectPhases = async (req: Request, res: Response) => {
 export const updateProjectPhase = async (req: Request, res: Response) => {
   try {
     const { phaseId } = req.params;
-    const updates = req.body;
 
-    // Build UPDATE query dynamically
-    const setClauses = Object.keys(updates)
-      .map(key => `${key} = ?`)
-      .join(', ');
-    const values = Object.values(updates);
+    // Los nombres de columna salen siempre de la lista blanca, nunca de las claves que envía el cliente
+    const selection = selectWritableColumns(req.body, PROJECT_PHASE_UPDATABLE_COLUMNS);
+    if ('error' in selection) return res.status(400).json({ error: selection.error });
+    if (!selection.columns.length) return res.status(400).json({ error: 'No hay campos para actualizar' });
 
     await db.run(`
       UPDATE project_phases
-      SET ${setClauses}
+      SET ${selection.columns.map(column => `${column} = ?`).join(', ')}
       WHERE id = ?
-    `, [...values, phaseId]);
+    `, [...selection.values, phaseId]);
 
     const phase = await db.get(`
       SELECT pp.*, ppt.category, ppt.color
@@ -318,7 +336,7 @@ export const createPhaseActivity = async (req: AuthenticatedRequest, res: Respon
     // The phase and authenticated session are the source of truth for these
     // required foreign keys; the activity form does not submit either value.
     const phase = await db.get(
-      'SELECT project_id FROM project_phases WHERE id = ?',
+      'SELECT project_id, name FROM project_phases WHERE id = ?',
       [phaseId]
     );
     if (!phase) {
@@ -341,6 +359,40 @@ export const createPhaseActivity = async (req: AuthenticatedRequest, res: Respon
       evidence_description
     ]);
 
+    const hoursLogged = Math.round(((Number(duration_minutes) || 0) / 60) * 100) / 100;
+    if (hoursLogged > 0 && hoursLogged <= 24) {
+      await db.run(
+        `UPDATE project_phases SET actual_hours = COALESCE(actual_hours, 0) + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [hoursLogged, phaseId]
+      );
+      const entryDate = start_datetime ? String(start_datetime).slice(0, 10) : new Date().toISOString().slice(0, 10);
+      const lockedPeriod = await db.get(
+        `SELECT id FROM timesheet_periods WHERE user_id = ? AND period_start <= ? AND period_end >= ? AND status IN ('submitted', 'approved')`,
+        [req.user.id, entryDate, entryDate]
+      );
+      if (!lockedPeriod) {
+        const openPeriod = await db.get(
+          `SELECT id FROM timesheet_periods WHERE user_id = ? AND period_start <= ? AND period_end >= ? AND status = 'open'`,
+          [req.user.id, entryDate, entryDate]
+        );
+        await db.run(
+          `INSERT INTO time_entries (
+            user_id, project_id, description, hours, date, is_billable,
+            approval_status, timesheet_period_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            req.user.id,
+            phase.project_id,
+            `[Ciclo de Vida · ${phase.name}] ${description || activity_type}`,
+            hoursLogged,
+            entryDate,
+            is_billable === false ? 0 : 1,
+            openPeriod?.id ?? null
+          ]
+        );
+      }
+    }
+
     const activity = await db.get(`
       SELECT pa.*, u.full_name as user_full_name
       FROM phase_activities pa
@@ -358,16 +410,16 @@ export const createPhaseActivity = async (req: AuthenticatedRequest, res: Respon
 export const updatePhaseActivity = async (req: Request, res: Response) => {
   try {
     const { activityId } = req.params;
-    const updates = req.body;
 
-    const setClauses = Object.keys(updates).map(key => `${key} = ?`).join(', ');
-    const values = Object.values(updates);
+    const selection = selectWritableColumns(req.body, PHASE_ACTIVITY_UPDATABLE_COLUMNS);
+    if ('error' in selection) return res.status(400).json({ error: selection.error });
+    if (!selection.columns.length) return res.status(400).json({ error: 'No hay campos para actualizar' });
 
     await db.run(`
       UPDATE phase_activities
-      SET ${setClauses}
+      SET ${selection.columns.map(column => `${column} = ?`).join(', ')}
       WHERE id = ?
-    `, [...values, activityId]);
+    `, [...selection.values, activityId]);
 
     const activity = await db.get(`
       SELECT pa.*, u.full_name as user_full_name
@@ -468,16 +520,16 @@ export const createProjectDelay = async (req: Request, res: Response) => {
 export const updateProjectDelay = async (req: Request, res: Response) => {
   try {
     const { delayId } = req.params;
-    const updates = req.body;
 
-    const setClauses = Object.keys(updates).map(key => `${key} = ?`).join(', ');
-    const values = Object.values(updates);
+    const selection = selectWritableColumns(req.body, PROJECT_DELAY_UPDATABLE_COLUMNS);
+    if ('error' in selection) return res.status(400).json({ error: selection.error });
+    if (!selection.columns.length) return res.status(400).json({ error: 'No hay campos para actualizar' });
 
     await db.run(`
       UPDATE project_delays
-      SET ${setClauses}
+      SET ${selection.columns.map(column => `${column} = ?`).join(', ')}
       WHERE id = ?
-    `, [...values, delayId]);
+    `, [...selection.values, delayId]);
 
     const delay = await db.get(`
       SELECT

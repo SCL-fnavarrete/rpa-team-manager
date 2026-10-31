@@ -59,7 +59,8 @@ interface ErrorState {
 interface PMOMetrics {
   completion_percentage: number;
   schedule_variance_days: number;
-  cost_variance_percentage: number;
+  // Solo lo envía el backend a team_lead
+  cost_variance_percentage?: number;
   risk_level: 'low' | 'medium' | 'high' | 'critical';
   team_velocity: number;
   bugs_found: number;
@@ -115,7 +116,7 @@ export const ProjectPMOView: React.FC<ProjectPMOViewProps> = ({
         setPmoMetrics({
           completion_percentage: project.completion_percentage || 0,
           schedule_variance_days: project.schedule_variance_days || 0,
-          cost_variance_percentage: project.cost_variance_percentage || 0,
+          cost_variance_percentage: project.cost_variance_percentage === undefined ? undefined : project.cost_variance_percentage || 0,
           risk_level: project.risk_level || 'low',
           team_velocity: project.team_velocity || 0,
           bugs_found: project.bugs_found || 0,
@@ -380,6 +381,8 @@ export const ProjectPMOView: React.FC<ProjectPMOViewProps> = ({
   }
 
   const scheduleStatus = pmoMetrics?.schedule_variance_days || 0;
+  const showBudget = pmoMetrics?.cost_variance_percentage !== undefined;
+  const metricColumnSpan = showBudget ? 6 : 8;
   const costStatus = pmoMetrics?.cost_variance_percentage || 0;
   const qualityScore = pmoMetrics?.bugs_found ? 
     Math.max(0, 100 - ((pmoMetrics.bugs_found - (pmoMetrics.bugs_resolved || 0)) * 10)) : 100;
@@ -393,7 +396,7 @@ export const ProjectPMOView: React.FC<ProjectPMOViewProps> = ({
           {pmoMetrics && (
             <Card title="Indicadores del proyecto" style={{ marginBottom: '24px' }}>
               <Row gutter={[16, 16]}>
-                <Col xs={12} sm={6}>
+                <Col xs={12} sm={metricColumnSpan}>
                   <Statistic
                     title="Avance del cronograma"
                     value={pmoMetrics.completion_percentage}
@@ -405,7 +408,7 @@ export const ProjectPMOView: React.FC<ProjectPMOViewProps> = ({
                     prefix={<TrophyOutlined />}
                   />
                 </Col>
-                <Col xs={12} sm={6}>
+                <Col xs={12} sm={metricColumnSpan}>
                   <Tooltip title={scheduleStatus >= 0 ? "Días de adelanto" : "Días de retraso"}>
                     <Statistic
                       title="Programar"
@@ -418,20 +421,22 @@ export const ProjectPMOView: React.FC<ProjectPMOViewProps> = ({
                     />
                   </Tooltip>
                 </Col>
-                <Col xs={12} sm={6}>
-                  <Tooltip title={costStatus <= 0 ? "Bajo el presupuesto" : "Sobre el presupuesto"}>
-                    <Statistic
-                      title="Presupuesto"
-                      value={Math.abs(costStatus)}
-                      suffix="%"
-                      prefix={costStatus <= 0 ? "+" : "-"}
-                      valueStyle={{ 
-                        color: costStatus <= 0 ? 'var(--color-success)' : 'var(--color-error)' 
-                      }}
-                    />
-                  </Tooltip>
-                </Col>
-                <Col xs={12} sm={6}>
+                {showBudget && (
+                  <Col xs={12} sm={metricColumnSpan}>
+                    <Tooltip title={costStatus <= 0 ? "Bajo el presupuesto" : "Sobre el presupuesto"}>
+                      <Statistic
+                        title="Presupuesto"
+                        value={Math.abs(costStatus)}
+                        suffix="%"
+                        prefix={costStatus <= 0 ? "+" : "-"}
+                        valueStyle={{ 
+                          color: costStatus <= 0 ? 'var(--color-success)' : 'var(--color-error)' 
+                        }}
+                      />
+                    </Tooltip>
+                  </Col>
+                )}
+                <Col xs={12} sm={metricColumnSpan}>
                   <Statistic
                     title="Puntaje de calidad"
                     value={qualityScore}

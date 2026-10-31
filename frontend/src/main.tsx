@@ -1,6 +1,10 @@
 import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
 import './index.css'
+import { setupSpanishNumberFormatting } from './utils/numberFormat'
+
+// Inicializar formato numérico estándar español (separador de miles con punto y decimal con coma)
+setupSpanishNumberFormatting();
 
 // Clear potentially corrupted auth data on app start
 const clearCorruptedAuthData = () => {

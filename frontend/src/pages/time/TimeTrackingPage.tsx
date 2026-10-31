@@ -16,7 +16,9 @@ import {
   InputNumber,
   Popconfirm,
   Alert,
-  Checkbox
+  Checkbox,
+  Tooltip,
+  theme
 } from 'antd';
 import {
   PlayCircleOutlined,
@@ -24,6 +26,7 @@ import {
   ClockCircleOutlined,
   PlusOutlined,
   DeleteOutlined,
+  CopyOutlined,
   LeftOutlined,
   RightOutlined,
   SendOutlined
@@ -49,6 +52,12 @@ interface Project {
   name: string;
 }
 
+interface TaskOption {
+  id: number;
+  title: string;
+  project_id?: number;
+}
+
 interface ActiveTimer {
   id: number;
   project_id: number;
@@ -70,7 +79,12 @@ const formatReminderDate = (date: string) => new Intl.DateTimeFormat('es-CL', {
   day: '2-digit', month: '2-digit', year: 'numeric'
 }).format(new Date(`${date.slice(0, 10)}T00:00:00`));
 
-const WeekGrid: React.FC<{ projects: Project[]; refreshSignal: number }> = ({ projects, refreshSignal }) => {
+const WeekGrid: React.FC<{
+  projects: Project[];
+  tasksByProject: Record<number, TaskOption[]>;
+  ensureProjectTasks: (projectId: number) => void;
+  refreshSignal: number;
+}> = ({ projects, tasksByProject, ensureProjectTasks, refreshSignal }) => {
   const [weekStart, setWeekStart] = useState(mondayOf(dayjs()));
   const [week, setWeek] = useState<TimesheetWeek | null>(null);
   const [loading, setLoading] = useState(false);
@@ -79,13 +93,18 @@ const WeekGrid: React.FC<{ projects: Project[]; refreshSignal: number }> = ({ pr
 
   const seedDraftFromWeek = (data: TimesheetWeek) => {
     const draft: Record<string, SaveWeekEntryInput[]> = {};
+    const projectIds = new Set<number>();
     data.days.forEach(day => {
-      draft[day.date] = day.entries.map(e => ({
-        id: e.id, project_id: e.project_id, task_id: e.task_id, description: e.description,
-        date: e.date, hours: e.hours, is_billable: e.is_billable
-      }));
+      draft[day.date] = day.entries.map(e => {
+        if (e.project_id) projectIds.add(e.project_id);
+        return {
+          id: e.id, project_id: e.project_id, task_id: e.task_id, description: e.description,
+          date: e.date, hours: e.hours, is_billable: e.is_billable
+        };
+      });
     });
     setDraftByDay(draft);
+    projectIds.forEach(pid => ensureProjectTasks(pid));
   };
 
   const loadWeek = useCallback(async () => {
@@ -111,9 +130,10 @@ const WeekGrid: React.FC<{ projects: Project[]; refreshSignal: number }> = ({ pr
 
   const addRow = (date: string) => {
     if (isLocked || !projects[0]) return;
+    ensureProjectTasks(projects[0].id);
     setDraftByDay(prev => ({
       ...prev,
-      [date]: [...(prev[date] || []), { project_id: projects[0].id, date, hours: 1, is_billable: true }]
+      [date]: [...(prev[date] || []), { project_id: projects[0].id, task_id: null, date, hours: 1, is_billable: true }]
     }));
   };
 
@@ -131,6 +151,78 @@ const WeekGrid: React.FC<{ projects: Project[]; refreshSignal: number }> = ({ pr
       rows.splice(index, 1);
       return { ...prev, [date]: rows };
     });
+  };
+
+  const repeatEntryMonToFri = (sourceEntry: SaveWeekEntryInput) => {
+    if (isLocked || !week?.days) return;
+    const workdays = week.days.slice(0, 5); // Lunes a Viernes
+    setDraftByDay((prev) => {
+      const next = { ...prev };
+      workdays.forEach((d) => {
+        const currentRows = [...(next[d.date] || [])];
+        const exists = currentRows.some(
+          (r) => r.project_id === sourceEntry.project_id && (r.task_id ?? null) === (sourceEntry.task_id ?? null)
+        );
+        if (!exists) {
+          currentRows.push({
+            project_id: sourceEntry.project_id,
+            task_id: sourceEntry.task_id ?? null,
+            date: d.date,
+            hours: sourceEntry.hours || 1,
+            is_billable: sourceEntry.is_billable !== false,
+            description: sourceEntry.description || ''
+          });
+        }
+        next[d.date] = currentRows;
+      });
+      return next;
+    });
+    message.success('Registro replicado de Lunes a Viernes en tu borrador');
+  };
+
+  const handleCopyPreviousWeek = async () => {
+    if (isLocked || !week?.days) return;
+    try {
+      const prevStart = mondayOf(dayjs(weekStart).subtract(7, 'day'));
+      const prevWeek: TimesheetWeek = await apiService.getTimesheetWeek(prevStart);
+      if (!prevWeek?.days || prevWeek.days.every((d) => !d.entries?.length)) {
+        message.info('La semana anterior no tiene registros para copiar');
+        return;
+      }
+      const nextDraft = { ...draftByDay };
+      let copiedCount = 0;
+      week.days.forEach((currDay, dayIndex) => {
+        const prevDay = prevWeek.days[dayIndex];
+        if (!prevDay?.entries?.length) return;
+        const currRows = [...(nextDraft[currDay.date] || [])];
+        prevDay.entries.forEach((pe) => {
+          if (pe.project_id) ensureProjectTasks(pe.project_id);
+          const exists = currRows.some(
+            (r) => r.project_id === pe.project_id && (r.task_id ?? null) === (pe.task_id ?? null)
+          );
+          if (!exists) {
+            currRows.push({
+              project_id: pe.project_id,
+              task_id: pe.task_id ?? null,
+              date: currDay.date,
+              hours: pe.hours || 1,
+              is_billable: pe.is_billable !== false,
+              description: pe.description || ''
+            });
+            copiedCount += 1;
+          }
+        });
+        nextDraft[currDay.date] = currRows;
+      });
+      setDraftByDay(nextDraft);
+      if (copiedCount > 0) {
+        message.success(`Se copiaron ${copiedCount} registro(s) de la semana anterior`);
+      } else {
+        message.info('Los proyectos y tareas de la semana anterior ya están en esta semana');
+      }
+    } catch {
+      message.error('No se pudo copiar la semana anterior');
+    }
   };
 
   const handleSave = async (): Promise<boolean> => {
@@ -169,10 +261,17 @@ const WeekGrid: React.FC<{ projects: Project[]; refreshSignal: number }> = ({ pr
   return (
     <div>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
-        <Space>
+        <Space wrap>
           <Button aria-label="Semana anterior" icon={<LeftOutlined />} onClick={() => setWeekStart(mondayOf(dayjs(weekStart).subtract(7, 'day')))} />
           <Text strong>Semana del {dayjs(weekStart).format('DD/MM/YYYY')}</Text>
           <Button aria-label="Semana siguiente" icon={<RightOutlined />} onClick={() => setWeekStart(mondayOf(dayjs(weekStart).add(7, 'day')))} />
+          {!isLocked && (
+            <Tooltip title="Copia en 1 clic los proyectos y tareas registrados en la semana anterior">
+              <Button size="small" icon={<CopyOutlined />} onClick={() => void handleCopyPreviousWeek()}>
+                Copiar semana anterior
+              </Button>
+            </Tooltip>
+          )}
         </Space>
         <Space>
           <Statistic title="Total de la semana" value={weekTotal} suffix="h" precision={2} />
@@ -207,62 +306,100 @@ const WeekGrid: React.FC<{ projects: Project[]; refreshSignal: number }> = ({ pr
               extra={<Text type="secondary">{(draftByDay[day.date] || []).reduce((s, e) => s + (e.hours || 0), 0)}h</Text>}
             >
               {(draftByDay[day.date] || []).map((entry, idx) => (
-                <Row gutter={4} key={idx} style={{ marginBottom: 8 }} align="middle">
-                  <Col span={9}>
-                    <Select
-                      size="small"
-                      aria-label={`Proyecto para registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
-                      style={{ width: '100%' }}
-                      value={entry.project_id}
-                      disabled={isLocked}
-                      onChange={(v) => updateRow(day.date, idx, { project_id: v })}
-                    >
-                      {projects.map(p => <Option key={p.id} value={p.id}>{p.name}</Option>)}
-                    </Select>
-                  </Col>
-                  <Col span={7}>
-                    <Input
-                      size="small"
-                      placeholder="Descripción"
-                      aria-label={`Descripción para registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
-                      disabled={isLocked}
-                      value={entry.description || ''}
-                      onChange={(e) => updateRow(day.date, idx, { description: e.target.value })}
-                    />
-                  </Col>
-                  <Col span={5}>
-                    <InputNumber
-                      size="small"
-                      aria-label={`Horas para registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
-                      min={0.25}
-                      max={24}
-                      step={0.25}
-                      style={{ width: '100%' }}
-                      disabled={isLocked}
-                      value={entry.hours}
-                      onChange={(v) => updateRow(day.date, idx, { hours: v || 0 })}
-                    />
-                  </Col>
-                  <Col span={2}>
-                    <Checkbox
-                      aria-label={`Facturable, registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
-                      checked={entry.is_billable !== false}
-                      disabled={isLocked}
-                      onChange={(e) => updateRow(day.date, idx, { is_billable: e.target.checked })}
-                    />
-                  </Col>
-                  <Col span={1}>
-                    <Button
-                      size="small"
-                      type="text"
-                      aria-label={`Eliminar registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
-                      danger
-                      icon={<DeleteOutlined />}
-                      disabled={isLocked}
-                      onClick={() => removeRow(day.date, idx)}
-                    />
-                  </Col>
-                </Row>
+                <div key={idx} style={{ marginBottom: 10 }}>
+                  <Row gutter={4} align="middle">
+                    <Col span={10}>
+                      <Select
+                        size="small"
+                        aria-label={`Proyecto para registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                        style={{ width: '100%' }}
+                        value={entry.project_id}
+                        disabled={isLocked}
+                        onChange={(v) => {
+                          ensureProjectTasks(v);
+                          updateRow(day.date, idx, { project_id: v, task_id: null });
+                        }}
+                      >
+                        {projects.map(p => <Option key={p.id} value={p.id}>{p.name}</Option>)}
+                      </Select>
+                    </Col>
+                    <Col span={6}>
+                      <InputNumber
+                        size="small"
+                        aria-label={`Horas para registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                        min={0.25}
+                        max={24}
+                        step={0.25}
+                        style={{ width: '100%' }}
+                        disabled={isLocked}
+                        value={entry.hours}
+                        onChange={(v) => updateRow(day.date, idx, { hours: v || 0 })}
+                      />
+                    </Col>
+                    <Col span={5} style={{ textAlign: 'center' }}>
+                      <Checkbox
+                        aria-label={`Facturable, registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                        checked={entry.is_billable !== false}
+                        disabled={isLocked}
+                        onChange={(e) => updateRow(day.date, idx, { is_billable: e.target.checked })}
+                      >
+                        <Text type="secondary" style={{ fontSize: 11 }}>Fact.</Text>
+                      </Checkbox>
+                    </Col>
+                    <Col span={3} style={{ textAlign: 'right' }}>
+                      <Space size={0}>
+                        <Tooltip title="Repetir este proyecto y tarea de Lunes a Viernes">
+                          <Button
+                            size="small"
+                            type="text"
+                            aria-label={`Repetir de Lunes a Viernes registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                            icon={<CopyOutlined />}
+                            disabled={isLocked}
+                            onClick={() => repeatEntryMonToFri(entry)}
+                          />
+                        </Tooltip>
+                        <Button
+                          size="small"
+                          type="text"
+                          aria-label={`Eliminar registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                          danger
+                          icon={<DeleteOutlined />}
+                          disabled={isLocked}
+                          onClick={() => removeRow(day.date, idx)}
+                        />
+                      </Space>
+                    </Col>
+                  </Row>
+                  <Row gutter={4} style={{ marginTop: 4 }} align="middle">
+                    <Col span={12}>
+                      <Select
+                        size="small"
+                        allowClear
+                        placeholder="Tarea (opcional)"
+                        aria-label={`Tarea para registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                        style={{ width: '100%' }}
+                        value={entry.task_id ?? undefined}
+                        disabled={isLocked}
+                        onFocus={() => entry.project_id && ensureProjectTasks(entry.project_id)}
+                        onChange={(v) => updateRow(day.date, idx, { task_id: v ?? null })}
+                      >
+                        {(tasksByProject[entry.project_id] || []).map(t => (
+                          <Option key={t.id} value={t.id}>{t.title}</Option>
+                        ))}
+                      </Select>
+                    </Col>
+                    <Col span={12}>
+                      <Input
+                        size="small"
+                        placeholder="Descripción / nota"
+                        aria-label={`Descripción para registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                        disabled={isLocked}
+                        value={entry.description || ''}
+                        onChange={(e) => updateRow(day.date, idx, { description: e.target.value })}
+                      />
+                    </Col>
+                  </Row>
+                </div>
               ))}
               <Button
                 size="small"
@@ -303,10 +440,13 @@ const WeekGrid: React.FC<{ projects: Project[]; refreshSignal: number }> = ({ pr
 export const TimeTrackingPage: React.FC = () => {
   const { user } = useAuthStore();
   const [projects, setProjects] = useState<Project[]>([]);
+  const [tasksByProject, setTasksByProject] = useState<Record<number, TaskOption[]>>({});
   const [activeTimer, setActiveTimer] = useState<ActiveTimer | null>(null);
   const [timerLoading, setTimerLoading] = useState(false);
   const [elapsedTime, setElapsedTime] = useState(0);
   const [selectedTimerProject, setSelectedTimerProject] = useState<number | undefined>(undefined);
+  const [selectedTimerTask, setSelectedTimerTask] = useState<number | undefined>(undefined);
+  const [timerDescription, setTimerDescription] = useState<string>('');
   const [reminderDates, setReminderDates] = useState<string[]>([]);
   const [gridRefreshSignal, setGridRefreshSignal] = useState(0);
 
@@ -315,6 +455,20 @@ export const TimeTrackingPage: React.FC = () => {
 
   const canApprove = user?.role === 'team_lead';
   const canSeeEffectiveness = user?.role === 'team_lead' || user?.role === 'rpa_operations';
+
+  const ensureProjectTasks = useCallback(async (projectId: number) => {
+    if (!projectId) return;
+    try {
+      const res = await apiService.get(`/tasks?project_id=${projectId}&limit=100`);
+      const list = Array.isArray(res) ? res : (Array.isArray(res?.data) ? res.data : []);
+      setTasksByProject(prev => ({
+        ...prev,
+        [projectId]: list.map((t: any) => ({ id: t.id, title: t.title, project_id: t.project_id }))
+      }));
+    } catch {
+      // No-op if project has no tasks or mock returns null
+    }
+  }, []);
 
   const loadProjects = async () => {
     try {
@@ -347,14 +501,32 @@ export const TimeTrackingPage: React.FC = () => {
   useEffect(() => {
     const tabFromParams = searchParams.get('tab') || 'week';
     setActiveTab(tabFromParams);
-  }, [searchParams]);
+    const presetProject = searchParams.get('project_id');
+    const presetTask = searchParams.get('task_id');
+    if (presetProject && !Number.isNaN(Number(presetProject))) {
+      const pid = Number(presetProject);
+      setSelectedTimerProject(pid);
+      ensureProjectTasks(pid);
+      if (presetTask && !Number.isNaN(Number(presetTask))) {
+        setSelectedTimerTask(Number(presetTask));
+      }
+    }
+  }, [searchParams, ensureProjectTasks]);
 
   useEffect(() => {
     loadProjects();
     loadActiveTimer();
     loadReminders();
     const interval = setInterval(loadActiveTimer, 5000);
-    return () => clearInterval(interval);
+    const onGlobalTimerChange = () => {
+      void loadActiveTimer();
+      setGridRefreshSignal(s => s + 1);
+    };
+    window.addEventListener('rpa-timer-updated', onGlobalTimerChange);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('rpa-timer-updated', onGlobalTimerChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -377,9 +549,14 @@ export const TimeTrackingPage: React.FC = () => {
   const handleStartTimer = async (projectId: number) => {
     try {
       setTimerLoading(true);
-      const response = await apiService.post('/time-entries/start-timer', { project_id: projectId });
+      const payload: Record<string, any> = { project_id: projectId };
+      if (selectedTimerTask) payload.task_id = selectedTimerTask;
+      if (timerDescription.trim()) payload.description = timerDescription.trim();
+      const response = await apiService.post('/time-entries/start-timer', payload);
       setActiveTimer(response);
+      setTimerDescription('');
       setGridRefreshSignal(s => s + 1);
+      window.dispatchEvent(new CustomEvent('rpa-timer-updated'));
     } catch (error: any) {
       message.error(error.response?.data?.error || "Error al iniciar el cronómetro");
     } finally {
@@ -394,6 +571,7 @@ export const TimeTrackingPage: React.FC = () => {
       setActiveTimer(null);
       setGridRefreshSignal(s => s + 1);
       message.success("Cronómetro detenido");
+      window.dispatchEvent(new CustomEvent('rpa-timer-updated'));
     } catch (error: any) {
       message.error(error.response?.data?.error || "Error al detener el cronómetro");
     } finally {
@@ -405,7 +583,14 @@ export const TimeTrackingPage: React.FC = () => {
     {
       key: 'week',
       label: 'Mi semana',
-      children: <WeekGrid projects={projects} refreshSignal={gridRefreshSignal} />
+      children: (
+        <WeekGrid
+          projects={projects}
+          tasksByProject={tasksByProject}
+          ensureProjectTasks={ensureProjectTasks}
+          refreshSignal={gridRefreshSignal}
+        />
+      )
     }
   ];
 
@@ -452,7 +637,11 @@ export const TimeTrackingPage: React.FC = () => {
               <Statistic title="Tiempo transcurrido" value={formatElapsedTime(elapsedTime)} valueStyle={{ fontFamily: 'monospace' }} />
             </Col>
             <Col flex="auto">
-              <Link to={`/projects/${activeTimer.project_id}`}>{activeTimer.project_name || 'Abrir proyecto'}</Link>
+              <Space direction="vertical" size={2}>
+                <Link to={`/projects/${activeTimer.project_id}`}>{activeTimer.project_name || 'Abrir proyecto'}</Link>
+                {activeTimer.task_title && <Tag color="blue">{activeTimer.task_title}</Tag>}
+                {activeTimer.description && <Text type="secondary">{activeTimer.description}</Text>}
+              </Space>
             </Col>
             <Col>
               <Button type="primary" danger icon={<PauseCircleOutlined />} loading={timerLoading} onClick={handleStopTimer}>
@@ -461,15 +650,37 @@ export const TimeTrackingPage: React.FC = () => {
             </Col>
           </Row>
         ) : (
-          <Space>
+          <Space wrap>
             <Select
               placeholder="Proyecto"
-              style={{ width: 240 }}
+              style={{ width: 220 }}
               value={selectedTimerProject}
-              onChange={(v) => setSelectedTimerProject(v)}
+              onChange={(v) => {
+                setSelectedTimerProject(v);
+                setSelectedTimerTask(undefined);
+                ensureProjectTasks(v);
+              }}
             >
               {projects.map(p => <Option key={p.id} value={p.id}>{p.name}</Option>)}
             </Select>
+            <Select
+              allowClear
+              placeholder="Tarea (opcional)"
+              style={{ width: 220 }}
+              value={selectedTimerTask}
+              disabled={!selectedTimerProject}
+              onChange={(v) => setSelectedTimerTask(v)}
+            >
+              {(selectedTimerProject ? (tasksByProject[selectedTimerProject] || []) : []).map(t => (
+                <Option key={t.id} value={t.id}>{t.title}</Option>
+              ))}
+            </Select>
+            <Input
+              placeholder="Actividad / nota rápida (opcional)"
+              style={{ width: 240 }}
+              value={timerDescription}
+              onChange={(e) => setTimerDescription(e.target.value)}
+            />
             <Button
               type="primary"
               icon={<PlayCircleOutlined />}
@@ -496,6 +707,7 @@ export const TimeTrackingPage: React.FC = () => {
 };
 
 const ApprovalsTab: React.FC = () => {
+  const { token } = theme.useToken();
   const [periods, setPeriods] = useState<TimesheetPeriod[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -540,10 +752,57 @@ const ApprovalsTab: React.FC = () => {
       loading={loading}
       dataSource={periods}
       rowKey="id"
+      expandable={{
+        expandedRowRender: (record: TimesheetPeriod) => {
+          const entries = record.entries || [];
+          if (entries.length === 0) {
+            return <Text type="secondary">Sin desglose de registros disponible para esta semana.</Text>;
+          }
+          return (
+            <div style={{ padding: '8px 12px', border: `1px solid ${token.colorBorderSecondary}`, borderRadius: token.borderRadius }}>
+              <Text strong style={{ display: 'block', marginBottom: 8 }}>
+                Desglose de imputaciones ({entries.length} registros · {record.total_hours}h totales)
+              </Text>
+              <Table
+                size="small"
+                pagination={false}
+                rowKey="id"
+                dataSource={entries}
+                columns={[
+                  { title: 'Fecha', dataIndex: 'date', width: 110, render: (d: string) => dayjs(d).format('DD/MM/YYYY') },
+                  { title: 'Proyecto', dataIndex: 'project_name', render: (name: string, e) => <Link to={`/projects/${e.project_id}`}>{name}</Link> },
+                  { title: 'Tarea', dataIndex: 'task_title', render: (t: string | null) => t ? <Tag color="blue">{t}</Tag> : <Text type="secondary">-</Text> },
+                  { title: 'Descripción / Actividad', dataIndex: 'description', render: (d: string | null) => d || <Text type="secondary">-</Text> },
+                  { title: 'Horas', dataIndex: 'hours', width: 90, render: (h: number) => <Text strong>{h}h</Text> },
+                  { title: 'Tipo', dataIndex: 'is_billable', width: 110, render: (b: boolean) => <Tag color={b ? 'green' : 'default'}>{b ? 'Facturable' : 'Interna'}</Tag> }
+                ]}
+              />
+            </div>
+          );
+        }
+      }}
       columns={[
         { title: 'Persona', dataIndex: 'user_name' },
         { title: 'Semana', render: (_: any, r: TimesheetPeriod) => `${dayjs(r.period_start).format('DD/MM/YY')}–${dayjs(r.period_end).format('DD/MM/YY')}` },
-        { title: 'Horas', dataIndex: 'total_hours' },
+        {
+          title: 'Proyectos imputados',
+          render: (_: any, r: TimesheetPeriod) => {
+            const entries = r.entries || [];
+            if (!entries.length) return <Text type="secondary">Expandir para revisar</Text>;
+            const byProject = new Map<string, number>();
+            entries.forEach(e => {
+              byProject.set(e.project_name, (byProject.get(e.project_name) || 0) + Number(e.hours || 0));
+            });
+            return (
+              <Space wrap size={4}>
+                {Array.from(byProject.entries()).map(([proj, hrs]) => (
+                  <Tag key={proj} color="processing">{proj}: {hrs}h</Tag>
+                ))}
+              </Space>
+            );
+          }
+        },
+        { title: 'Horas', dataIndex: 'total_hours', render: (h: number) => <Text strong>{h}h</Text> },
         {
           title: 'Acciones',
           render: (_: any, r: TimesheetPeriod) => (

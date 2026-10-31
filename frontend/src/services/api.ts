@@ -6,6 +6,8 @@ import { ActivityLogEntry } from '../types/activity';
 import { NotificationItem } from '../types/notification';
 import { TeamCostsResponse } from '@/types/teamCosts';
 import { CostCenter, ProjectCostCenterAllocation, CostCenterBillingSummaryRow } from '@/types/costCenter';
+import { PortfolioFilters, PortfolioResult } from '@/types/portfolio';
+import { ClosureReport } from '@/types/closureReport';
 
 interface RequestCache {
   [key: string]: {
@@ -588,6 +590,28 @@ class ApiService {
     await this.api.delete(`/commercial/projects/${projectId}/capacity/${userId}`);
   }
 
+  // Informe de cierre (solo team_lead): el backend responde { data: ClosureReport } y el PDF exige el token
+  async getClosureReport(projectId: number): Promise<ClosureReport> {
+    const response = await this.api.get(`/commercial/projects/${projectId}/closure-report`);
+    return response.data.data;
+  }
+
+  async downloadClosureReportPdf(projectId: number): Promise<Blob> {
+    const response = await this.api.get(`/commercial/projects/${projectId}/closure-report.pdf`, { responseType: 'blob' });
+    return response.data;
+  }
+
+  async transitionProjectToSupport(projectId: number, payload?: {
+    company_name?: string;
+    contracted_hours_monthly?: number;
+    hourly_rate?: number;
+    hourly_rate_currency?: string;
+    hourly_rate_extra?: number;
+  }): Promise<any> {
+    const response = await this.api.post(`/commercial/projects/${projectId}/transition-to-support`, payload || {});
+    return response.data?.data || response.data;
+  }
+
   // Timesheet endpoints (Fase 3 - Tiempo confiable y efectividad)
   async getTimesheetWeek(weekStart: string): Promise<any> {
     const response = await this.api.get(`/timesheet/week?week_start=${weekStart}`);
@@ -1039,12 +1063,23 @@ class ApiService {
     return response.data;
   }
 
+  async getPMOExecutiveSuite(): Promise<any> {
+    const response = await this.api.get('/pmo/executive-suite');
+    return response.data;
+  }
+
   async getPMOAnalytics(): Promise<any> {
     return this.makeRequest<any>('get', '/pmo/analytics', undefined, undefined, true);
   }
 
   async getPMOProjectGantt(projectId: number): Promise<any> {
     return this.makeRequest<any>('get', `/pmo/projects/${projectId}/gantt`, undefined, undefined, true);
+  }
+
+  // Cartera de proyectos (solo team_lead): el backend responde { data: PortfolioResult }
+  async getPortfolio(filters?: PortfolioFilters): Promise<PortfolioResult> {
+    const response = await this.api.get('/portfolio', { params: filters });
+    return response.data.data;
   }
 
   async createMilestone(milestoneData: any): Promise<any> {

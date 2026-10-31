@@ -24,6 +24,8 @@ import BillingPage from '@/pages/billing/BillingPage';
 import ProfilePage from '@/pages/profile/ProfilePage';
 import TeamManagementPage from '@/pages/admin/TeamManagementPage';
 import PriorityMatrixPage from '@/pages/priorities/PriorityMatrixPage';
+import { ScopingPage } from '@/pages/scoping/ScopingPage';
+import { PortfolioPage } from '@/pages/portfolio/PortfolioPage';
 
 // React Query client
 const queryClient = new QueryClient({
@@ -55,9 +57,10 @@ function App() {
               <Route index element={<Navigate to="/dashboard" replace />} />
               <Route path="dashboard" element={<DashboardPage />} />
               
-              {/* Projects */}
+              {/* Projects & Scoping */}
               <Route path="projects" element={<ProjectsPage />} />
               <Route path="projects/:id" element={<ProjectDetailPage />} />
+              <Route path="cotizador" element={<ScopingPage />} />
               <Route path="clients" element={
                 <ProtectedRoute requiredRoles={['team_lead', 'rpa_operations']}>
                   <ClientsPage />
@@ -82,7 +85,7 @@ function App() {
               
               {/* PMO Dashboard */}
               <Route path="pmo" element={
-                <ProtectedRoute requiredRoles={['team_lead', 'rpa_operations']}>
+                <ProtectedRoute requiredRoles={['team_lead', 'rpa_operations', 'billing']}>
                   <PMODashboard />
                 </ProtectedRoute>
               } />
@@ -91,6 +94,13 @@ function App() {
               <Route path="pmo/gantt/:id" element={
                 <ProtectedRoute requiredRoles={['team_lead', 'rpa_operations', 'rpa_developer']}>
                   <PMODashboard ganttMode={true} />
+                </ProtectedRoute>
+              } />
+
+              {/* Cartera de proyectos (Team Lead only - cifras de venta, costo y margen) */}
+              <Route path="portfolio" element={
+                <ProtectedRoute requiredRoles={['team_lead']}>
+                  <PortfolioPage />
                 </ProtectedRoute>
               } />
 

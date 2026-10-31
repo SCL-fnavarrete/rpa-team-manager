@@ -299,8 +299,8 @@ export class TimesheetService {
         return { ...period, status: 'submitted' };
     }
 
-    async getPendingApprovals(): Promise<Array<TimesheetPeriodRow & { user_name: string; total_hours: number }>> {
-        return db.query(
+    async getPendingApprovals(): Promise<Array<TimesheetPeriodRow & { user_name: string; total_hours: number; entries: TimeEntryRow[] }>> {
+        const periods = await db.query(
             `SELECT tp.*, u.full_name as user_name,
                     COALESCE((SELECT SUM(hours) FROM time_entries WHERE timesheet_period_id = tp.id), 0) as total_hours
              FROM timesheet_periods tp
@@ -308,6 +308,32 @@ export class TimesheetService {
              WHERE tp.status = 'submitted'
              ORDER BY tp.submitted_at ASC`
         );
+        if (!periods.length) return [];
+
+        const periodIds = periods.map((p: any) => p.id);
+        const placeholders = periodIds.map(() => '?').join(',');
+        const rawEntries = await db.query(
+            `SELECT te.id, te.timesheet_period_id, te.project_id, p.name as project_name, te.task_id, t.title as task_title,
+                    te.description, te.hours, te.date, te.is_billable, te.approval_status, te.is_locked
+             FROM time_entries te
+             JOIN projects p ON p.id = te.project_id
+             LEFT JOIN tasks t ON t.id = te.task_id
+             WHERE te.timesheet_period_id IN (${placeholders})
+             ORDER BY te.date ASC, te.created_at ASC`,
+            periodIds
+        );
+
+        const entriesByPeriod = new Map<number, TimeEntryRow[]>();
+        for (const raw of rawEntries) {
+            const list = entriesByPeriod.get(raw.timesheet_period_id) || [];
+            list.push(toRow(raw));
+            entriesByPeriod.set(raw.timesheet_period_id, list);
+        }
+
+        return periods.map((p: any) => ({
+            ...p,
+            entries: entriesByPeriod.get(p.id) || []
+        }));
     }
 
     private async getUserCostRateCLP(userId: number): Promise<number> {

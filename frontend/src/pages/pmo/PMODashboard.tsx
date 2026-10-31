@@ -55,9 +55,13 @@ import dayjs from 'dayjs';
 import { useBatchDeletion } from '../../hooks/useBatchDeletion';
 import { useGanttData } from '../../hooks/useGanttData';
 import { LoadingState } from '@/components/common';
+import { PMORoleHeader } from '@/components/pmo/PMORoleHeader';
+import { PMOGeneralManagerView } from '@/components/pmo/views/PMOGeneralManagerView';
+import { PMOCommercialView } from '@/components/pmo/views/PMOCommercialView';
+import { PMOControllerView } from '@/components/pmo/views/PMOControllerView';
+import { PMORolePerspective, PMOExecutiveSuiteResponse } from '@/types/pmo';
 
 const { Title, Text } = Typography;
-const { TabPane } = Tabs;
 
 interface PMODashboardData {
   projects: any[];
@@ -73,16 +77,17 @@ interface PMOAnalytics {
     active_projects: number;
     completed_projects: number;
     critical_projects: number;
-    over_budget_projects: number;
+    over_budget_projects?: number;
     delayed_projects: number;
     avg_completion: number;
     avg_satisfaction: number;
-    total_planned_budget: number;
-    total_actual_cost: number;
-    overall_budget_variance: number;
+    // Presupuesto y costos solo los envía el backend a team_lead
+    total_planned_budget?: number;
+    total_actual_cost?: number;
+    overall_budget_variance?: number;
   };
   trendAnalysis: any[];
-  budgetAnalysis: any[];
+  budgetAnalysis?: any[];
   scheduleAnalysis: any[];
   riskAnalysis: any[];
   teamAnalysis: any[];
@@ -125,6 +130,36 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
   const [stageFilter, setStageFilter] = useState<string | undefined>();
   const [mermaidDrawerVisible, setMermaidDrawerVisible] = useState(false);
   const [mermaidCode, setMermaidCode] = useState('');
+
+  // PMO Executive Suite perspective state
+  const [currentPerspective, setCurrentPerspective] = useState<PMORolePerspective>(() => {
+    if (ganttMode) return 'operations';
+    if (user?.role === 'billing') return 'controller';
+    const saved = localStorage.getItem('pmo_preferred_perspective') as PMORolePerspective | null;
+    return saved || 'general_manager';
+  });
+  const [executiveData, setExecutiveData] = useState<PMOExecutiveSuiteResponse | null>(null);
+  const [executiveLoading, setExecutiveLoading] = useState(false);
+
+  const handlePerspectiveChange = (perspective: PMORolePerspective) => {
+    setCurrentPerspective(perspective);
+    try {
+      localStorage.setItem('pmo_preferred_perspective', perspective);
+    } catch {}
+  };
+
+  const loadExecutiveData = async () => {
+    try {
+      setExecutiveLoading(true);
+      const data = await apiService.getPMOExecutiveSuite();
+      setExecutiveData(data);
+    } catch (error) {
+      console.error('Error loading PMO executive suite:', error);
+    } finally {
+      setExecutiveLoading(false);
+    }
+  };
+
   
   // Multi-selection state for batch deletion
   const [selectedItems, setSelectedItems] = useState<Set<number>>(new Set());
@@ -485,6 +520,7 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
   useEffect(() => {
     console.log('🚀 PMO Dashboard mounted - loading initial data');
     loadDashboardData();
+    loadExecutiveData();
     loadAnalytics();
     loadDropdownData();
     loadTeamCapacity();
@@ -690,16 +726,58 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
 
   const handleCreateTask = async (values: any) => {
     try {
-      // For now just show success message since we don't have task creation API
+      if (!selectedProjectId) {
+        message.warning('Selecciona un proyecto antes de crear una tarea');
+        return;
+      }
+      const startStr = values.start_date ? values.start_date.format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD');
+      const dueStr = values.due_date ? values.due_date.format('YYYY-MM-DD') : startStr;
+
+      const boards = await apiService.getTaskBoards(selectedProjectId).catch(() => []);
+      if (Array.isArray(boards) && boards.length > 0) {
+        const boardDetail = await apiService.getTaskBoard(boards[0].id);
+        const firstColumnId = boardDetail?.columns?.[0]?.id;
+        if (firstColumnId) {
+          await apiService.createTask({
+            board_id: boardDetail.id,
+            column_id: firstColumnId,
+            title: values.title,
+            description: values.description,
+            task_type: 'task',
+            status: values.status || 'todo',
+            priority: values.priority || 'medium',
+            assignee_ids: Array.isArray(values.assignee_ids) ? values.assignee_ids : [],
+            estimated_hours: values.estimated_hours ? Number(values.estimated_hours) : undefined,
+            start_date: startStr,
+            due_date: dueStr
+          });
+        } else {
+          await apiService.createMilestone({
+            project_id: selectedProjectId,
+            name: values.title,
+            description: values.description,
+            planned_date: startStr,
+            end_date: dueStr,
+            priority: values.priority || 'medium',
+            responsible_user_id: Array.isArray(values.assignee_ids) ? values.assignee_ids[0] : undefined
+          });
+        }
+      } else {
+        await apiService.createMilestone({
+          project_id: selectedProjectId,
+          name: values.title,
+          description: values.description,
+          planned_date: startStr,
+          end_date: dueStr,
+          priority: values.priority || 'medium',
+          responsible_user_id: Array.isArray(values.assignee_ids) ? values.assignee_ids[0] : undefined
+        });
+      }
+
       message.success(`Nueva tarea creada: ${values.title}`);
-      console.log('Task creation would send:', {
-        ...values,
-        start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : null,
-        due_date: values.due_date ? values.due_date.format('YYYY-MM-DD') : null
-      });
       setTaskModalVisible(false);
       taskForm.resetFields();
-      // Reload gantt data
+      loadDashboardData();
       if (selectedProjectId) {
         loadGanttData(selectedProjectId, true);
       }
@@ -1066,6 +1144,8 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
   });
   const needsAttention = visibleProjects.filter((project: any) => project.project_health_status === 'critical' || project.project_health_status === 'warning' || (project.days_to_deadline !== null && project.days_to_deadline !== undefined && project.days_to_deadline < 7));
   const openProject = (id: number) => navigate(`/projects/${id}`);
+  // Presupuesto y costos del análisis solo llegan para team_lead; sin ellos se omiten esas tarjetas y columnas
+  const showBudgetAnalytics = Array.isArray(analytics?.budgetAnalysis);
 
   if (loading) {
     return <LoadingState tip="Cargando centro PMO…" minHeight={400} />;
@@ -1073,26 +1153,74 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
 
   return (
     <div style={{ padding: 'clamp(12px, 3vw, 24px)' }}>
-      <Row justify="space-between" align="middle" style={{ marginBottom: '24px' }}>
-        <Col>
-          <Title level={2}>Centro PMO</Title>
-          <Text type="secondary">Excepciones, hitos y seguimiento del portafolio</Text>
-        </Col>
-        <Col>
-          <Space>
-            {['team_lead', 'rpa_operations'].includes(user?.role || '') && <Button
-              type="primary" 
-              icon={<PlusOutlined />}
-              onClick={() => setMilestoneModalVisible(true)}
-            >
-              Crear Hito
-            </Button>}
-          </Space>
-        </Col>
-      </Row>
+      <PMORoleHeader
+        currentPerspective={currentPerspective}
+        onPerspectiveChange={handlePerspectiveChange}
+        executiveData={executiveData}
+        loading={executiveLoading}
+        onRefresh={() => {
+          loadExecutiveData();
+          loadDashboardData();
+        }}
+      />
 
-      <Tabs activeKey={activeTab} onChange={setActiveTab}>
-        <TabPane tab="Vista General" key="overview">
+      {currentPerspective === 'general_manager' && (
+        <PMOGeneralManagerView
+          data={executiveData?.general_manager || null}
+          loading={executiveLoading}
+          onGoToGantt={(id) => {
+            setSelectedProjectId(id);
+            handlePerspectiveChange('operations');
+            setActiveTab('gantt');
+          }}
+        />
+      )}
+
+      {currentPerspective === 'commercial' && (
+        <PMOCommercialView
+          data={executiveData?.commercial || null}
+          loading={executiveLoading}
+        />
+      )}
+
+      {currentPerspective === 'controller' && (
+        <PMOControllerView
+          data={executiveData?.controller || null}
+          loading={executiveLoading}
+        />
+      )}
+
+      {currentPerspective === 'operations' && (
+        <>
+          <Row justify="space-between" align="middle" style={{ marginBottom: '16px' }}>
+            <Col>
+              <Title level={4} style={{ margin: 0 }}>Gestión Operativa PMO</Title>
+              <Text type="secondary">Portafolio, cronogramas Gantt, dependencias externas y capacidad FTE</Text>
+            </Col>
+            <Col>
+              <Space>
+                {['team_lead', 'rpa_operations'].includes(user?.role || '') && (
+                  <Button
+                    type="primary" 
+                    icon={<PlusOutlined />}
+                    onClick={() => setMilestoneModalVisible(true)}
+                  >
+                    Crear Hito
+                  </Button>
+                )}
+              </Space>
+            </Col>
+          </Row>
+
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        items={[
+          {
+            key: 'overview',
+            label: 'Vista General',
+            children: (
+              <>
           <Card title="Requieren atención" extra={<Tag>{needsAttention.length} proyectos</Tag>} style={{ marginBottom: 16 }}>
             <Space wrap style={{ width: '100%', marginBottom: 12 }}>
               <Input allowClear aria-label="Buscar proyectos" placeholder="Proyecto, cliente o responsable" value={projectFilter} onChange={event => setProjectFilter(event.target.value)} style={{ width: 'min(100%, 320px)' }} />
@@ -1389,22 +1517,21 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                         </div>
                       ),
                     },
-                    {
+                    ...(user?.role === 'team_lead' ? [{
                       title: 'Presupuesto',
                       key: 'budget',
                       width: 100,
-                      responsive: user?.role === 'team_lead' ? undefined : ['xxl'],
                       render: (record: any) => (
-                        user?.role === 'team_lead' ? <div style={{ fontSize: '11px' }}>
+                        <div style={{ fontSize: '11px' }}>
                           <div>{record.planned_budget ? `$${(record.planned_budget / 1000000).toFixed(1)}M` : 'N/A'}</div>
                           <div style={{ 
                             color: record.cost_variance_percentage > 10 ? 'var(--color-error)' : record.cost_variance_percentage > 0 ? 'var(--color-warning)' : 'var(--color-success)'
                           }}>
                             {record.cost_variance_percentage ? `${record.cost_variance_percentage > 0 ? '+' : ''}${record.cost_variance_percentage.toFixed(1)}%` : 'N/A'}
                           </div>
-                        </div> : null
+                        </div>
                       ),
-                    },
+                    }] : []),
                     {
                       title: 'Acciones',
                       key: 'actions',
@@ -1483,10 +1610,14 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
               </Card>
             </Col>
           </Row>
-        </TabPane>
-
-        <TabPane tab="Análisis" key="analytics">
-          {analytics ? (
+              </>
+            )
+          },
+          {
+            key: 'analytics',
+            label: 'Análisis',
+            children: (
+          analytics ? (
             <div>
               {/* Executive Summary Cards */}
               <Row gutter={[16, 16]} style={{ marginBottom: '24px' }}>
@@ -1513,7 +1644,9 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                       valueStyle={{ color: 'var(--color-error)', fontSize: '20px' }}
                     />
                     <div style={{ fontSize: '11px', color: 'var(--color-text-secondary)', marginTop: '4px' }}>
-                      {analytics.executiveSummary?.over_budget_projects || 0} sobre presupuesto
+                      {analytics.executiveSummary?.over_budget_projects === undefined
+                        ? 'requieren atención'
+                        : `${analytics.executiveSummary.over_budget_projects} sobre presupuesto`}
                     </div>
                   </Card>
                 </Col>
@@ -1549,8 +1682,8 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
 
               {/* Main Analytics Grid */}
               <Row gutter={[16, 16]} style={{ marginBottom: '24px' }}>
-                {/* Budget Performance */}
-                <Col xs={24} lg={12}>
+                {/* Budget Performance: el backend la envía solo a team_lead */}
+                {showBudgetAnalytics && <Col xs={24} lg={12}>
                   <Card 
                     title={
                       <span>
@@ -1609,10 +1742,10 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                       ))}
                     </div>
                   </Card>
-                </Col>
+                </Col>}
 
                 {/* Schedule Performance */}
-                <Col xs={24} lg={12}>
+                <Col xs={24} lg={showBudgetAnalytics ? 12 : 24}>
                   <Card 
                     title={
                       <span>
@@ -1787,11 +1920,13 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                             <div style={{ fontSize: '10px', color: 'var(--color-text-secondary)' }}>
                               Velocidad: {member.avg_velocity?.toFixed(1) || 'N/A'}
                             </div>
-                            <div style={{ fontSize: '9px', marginTop: '2px' }}>
-                              <Tag color={member.avg_budget_variance > 10 ? 'red' : member.avg_budget_variance > 0 ? 'orange' : 'green'}>
-                                {member.avg_budget_variance > 0 ? '+' : ''}{member.avg_budget_variance?.toFixed(1) || 0}% budget
-                              </Tag>
-                            </div>
+                            {member.avg_budget_variance !== undefined && (
+                              <div style={{ fontSize: '11px', marginTop: '2px' }}>
+                                <Tag color={member.avg_budget_variance > 10 ? 'red' : member.avg_budget_variance > 0 ? 'orange' : 'green'}>
+                                  {member.avg_budget_variance > 0 ? '+' : ''}{member.avg_budget_variance?.toFixed(1) || 0}% budget
+                                </Tag>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ))}
@@ -1842,7 +1977,7 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                             <div style={{ fontWeight: 'bold', fontSize: '11px' }}>
                               {project.project_name}
                             </div>
-                            <div style={{ fontSize: '9px', color: 'var(--color-text-secondary)' }}>
+                            <div style={{ fontSize: '11px', color: 'var(--color-text-secondary)' }}>
                               Bugs: {project.bugs_found || 0} / Resueltos: {project.bugs_resolved || 0}
                             </div>
                           </div>
@@ -1917,7 +2052,7 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                           width: 80,
                           render: (value: number) => `${value?.toFixed(0) || 0}%`
                         },
-                        { 
+                        ...(showBudgetAnalytics ? [{ 
                           title: 'En Presupuesto', 
                           dataIndex: 'on_budget_rate', 
                           key: 'on_budget_rate',
@@ -1927,7 +2062,7 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                               {value?.toFixed(0) || 0}%
                             </Tag>
                           )
-                        }
+                        }] : [])
                       ]}
                       size="small"
                       pagination={false}
@@ -2009,11 +2144,14 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                 <Text type="secondary">Preparando análisis avanzado de PMO</Text>
               </div>
             </Card>
-          )}
-        </TabPane>
-
-        <TabPane tab="Gantt Chart" key="gantt">
-          {!selectedProjectId ? (
+          )
+            )
+          },
+          {
+            key: 'gantt',
+            label: 'Gantt Chart',
+            children: (
+          !selectedProjectId ? (
             // Vista de selección de proyecto
             <Card title="Seleccionar Proyecto para Vista Gantt">
               <div style={{ textAlign: 'center', padding: '40px' }}>
@@ -2715,10 +2853,13 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
                 </Card>
               )}
             </div>
-          )}
-        </TabPane>
-
-        <TabPane tab="🔗 Dependencias Externas" key="dependencies">
+          )
+            )
+          },
+          {
+            key: 'dependencies',
+            label: '🔗 Dependencias Externas',
+            children: (
           <Card>
             <Title level={3} style={{ marginBottom: '20px' }}>
               📊 Dashboard de Dependencias Externas
@@ -2876,9 +3017,12 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
               </Col>
             </Row>
           </Card>
-        </TabPane>
-
-        <TabPane tab="👥 Capacidad FTE" key="capacity">
+            )
+          },
+          {
+            key: 'capacity',
+            label: '👥 Capacidad FTE',
+            children: (
           <Card
             title={
               <Space>
@@ -3049,8 +3193,12 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
               ]}
             />
           </Card>
-        </TabPane>
-      </Tabs>
+            )
+          }
+        ]}
+      />
+        </>
+      )}
 
       {/* Modal editar elemento */}
       <Modal

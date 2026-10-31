@@ -6,7 +6,7 @@ import { DollarOutlined, WarningOutlined } from '@ant-design/icons';
 import { Project } from '@/types/project';
 import { apiService } from '@/services/api';
 import { PriorityMatrix, QuadrantConfig, QuadrantRules, MatrixAxisConfig, MatrixItemRenderer, MatrixSummary } from '@/components/common';
-import { getProjectStatusColor } from '@/utils';
+import { getProjectStatusColor, formatSpanishNumber } from '@/utils';
 
 const { Text } = Typography;
 
@@ -94,11 +94,11 @@ const ProjectPriorityMatrix: React.FC<ProjectPriorityMatrixProps> = ({ projects 
 
 
   const formatCurrency = (amount: number) => {
-    return `$${amount.toLocaleString()}`;
+    return `$${formatSpanishNumber(amount)}`;
   };
 
   const formatPercentage = (value: number) => {
-    return `${value.toFixed(1)}%`;
+    return `${formatSpanishNumber(value, { decimals: 1 })}%`;
   };
 
   const handleProjectClick = (project: Project) => {
@@ -242,7 +242,7 @@ const ProjectPriorityMatrix: React.FC<ProjectPriorityMatrixProps> = ({ projects 
             <div>
               <Tag 
                 color={getProjectStatusColor(project.status)}
-                style={{ fontSize: '9px', padding: '1px 4px' }}
+                style={{ fontSize: '11px', padding: '1px 4px' }}
               >
                 {displayLabel(project.status)}
               </Tag>

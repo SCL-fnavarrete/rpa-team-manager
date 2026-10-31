@@ -124,7 +124,7 @@ const IdeaPriorityMatrix: React.FC<IdeaPriorityMatrixProps> = ({ ideas }) => {
         <Space size="small" style={{ fontSize: '10px' }}>
           <Tag 
             color={getIdeaStatusColor(idea.status)}
-            style={{ fontSize: '9px', padding: '1px 4px' }}
+            style={{ fontSize: '11px', padding: '1px 4px' }}
           >
             {displayLabel(idea.status)}
           </Tag>
