@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Layout, Menu, Avatar, Dropdown, Button, Typography, Grid, Breadcrumb } from 'antd';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Layout, Menu, Avatar, Dropdown, Button, Typography, Grid, Breadcrumb, Tag, Tooltip, message } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   DashboardOutlined,
@@ -22,10 +22,14 @@ import {
   TeamOutlined,
   SearchOutlined,
   CalculatorOutlined,
-  FolderOpenOutlined
+  FolderOpenOutlined,
+  PauseCircleOutlined,
+  PlayCircleOutlined
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import { useAuthStore } from '@/store/authStore';
+import { apiService } from '@/services/api';
+import dayjs from 'dayjs';
 import { NotificationBell } from './NotificationBell';
 import { GlobalSearch } from './GlobalSearch';
 import { RoleLabels, RoleColors } from '@/types/auth';
@@ -58,6 +62,9 @@ export const AppLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  const [activeTimer, setActiveTimer] = useState<any>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [stoppingTimer, setStoppingTimer] = useState(false);
   const mobileMenuTrigger = useRef<HTMLElement | null>(null);
   const mobileDrawerRef = useRef<HTMLElement | null>(null);
   const navigate = useNavigate();
@@ -65,6 +72,60 @@ export const AppLayout: React.FC = () => {
   const screens = Grid.useBreakpoint();
   const isMobile = !screens.md;
   const { user, logout } = useAuthStore();
+
+  const refreshGlobalTimer = useCallback(async () => {
+    if (!user || user.role === 'billing') return;
+    try {
+      const res = await apiService.get?.('/time-entries/active');
+      setActiveTimer(res || null);
+    } catch {
+      // Ignore polling error
+    }
+  }, [user]);
+
+  useEffect(() => {
+    void refreshGlobalTimer();
+    const interval = setInterval(() => void refreshGlobalTimer(), 8000);
+    const onTimerEvent = () => void refreshGlobalTimer();
+    window.addEventListener('rpa-timer-updated', onTimerEvent);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('rpa-timer-updated', onTimerEvent);
+    };
+  }, [refreshGlobalTimer]);
+
+  useEffect(() => {
+    if (activeTimer?.date && activeTimer?.start_time) {
+      const calc = () => setElapsedSeconds(Math.max(0, dayjs().diff(dayjs(`${activeTimer.date} ${activeTimer.start_time}`), 'second')));
+      calc();
+      const id = setInterval(calc, 1000);
+      return () => clearInterval(id);
+    }
+    setElapsedSeconds(0);
+  }, [activeTimer]);
+
+  const formatTimerHHMMSS = (s: number) => {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${r.toString().padStart(2, '0')}`;
+  };
+
+  const handleStopGlobalTimer = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!activeTimer) return;
+    setStoppingTimer(true);
+    try {
+      await apiService.post('/time-entries/stop-timer');
+      setActiveTimer(null);
+      message.success('Cronómetro detenido y horas guardadas en tu hoja semanal');
+      window.dispatchEvent(new CustomEvent('rpa-timer-updated'));
+    } catch {
+      message.error('No se pudo detener el cronómetro');
+    } finally {
+      setStoppingTimer(false);
+    }
+  };
 
   useEffect(() => {
     const drawer = mobileDrawerRef.current;
@@ -137,39 +198,57 @@ export const AppLayout: React.FC = () => {
     }
 
     const roleCanSeePMO = user?.role === 'team_lead' || user?.role === 'rpa_operations';
+    if (!roleCanSeePMO) {
+      return [
+        {
+          type: 'group',
+          label: 'MI DÍA A DÍA',
+          children: [
+            { key: '/dashboard', icon: <DashboardOutlined />, label: 'Inicio (Mi Día)' },
+            { key: '/tasks', icon: <CheckSquareOutlined />, label: 'Mis Tareas' },
+            { key: '/time', icon: <ClockCircleOutlined />, label: 'Registro de tiempo' }
+          ]
+        },
+        {
+          type: 'group',
+          label: 'PROYECTOS Y SOPORTE',
+          children: [
+            { key: '/projects', icon: <ProjectOutlined />, label: 'Portafolio de proyectos' },
+            { key: '/support', icon: <CustomerServiceOutlined />, label: 'Soporte RPA' },
+            { key: '/cotizador', icon: <CalculatorOutlined />, label: 'Cotizador RPA' }
+          ]
+        },
+        {
+          type: 'group',
+          label: 'RECURSOS',
+          children: [
+            { key: '/files', icon: <FileOutlined />, label: 'Documentos' },
+            { key: '/ideas', icon: <BulbOutlined />, label: 'Ideas' }
+          ]
+        }
+      ];
+    }
+
     const main: NonNullable<MenuProps['items']> = [
       { type: 'group', label: 'ESPACIO DE TRABAJO', children: [
         { key: '/dashboard', icon: <DashboardOutlined />, label: 'Inicio' },
         { key: '/projects', icon: <ProjectOutlined />, label: 'Portafolio' },
-        { key: '/cotizador', icon: <CalculatorOutlined />, label: 'Cotizador RPA' },
         { key: '/tasks', icon: <CheckSquareOutlined />, label: 'Tareas' },
-        { key: '/time', icon: <ClockCircleOutlined />, label: 'Registro de tiempo' }
+        { key: '/time', icon: <ClockCircleOutlined />, label: 'Registro de tiempo' },
+        { key: '/cotizador', icon: <CalculatorOutlined />, label: 'Cotizador RPA' },
+        { key: '/clients', icon: <TeamOutlined />, label: 'Clientes y comerciales' }
       ] },
-      { type: 'group', label: 'RECURSOS', children: [
-        { key: '/ideas', icon: <BulbOutlined />, label: 'Ideas' },
-        { key: '/files', icon: <FileOutlined />, label: 'Documentos' },
-        { key: '/support', icon: <CustomerServiceOutlined />, label: 'Soporte' }
-      ] }
-    ];
-
-    if (roleCanSeePMO) {
-      main[0] = { type: 'group', label: 'ESPACIO DE TRABAJO', children: [
-        { key: '/dashboard', icon: <DashboardOutlined />, label: 'Inicio' },
-        { key: '/projects', icon: <ProjectOutlined />, label: 'Portafolio' },
-        { key: '/cotizador', icon: <CalculatorOutlined />, label: 'Cotizador RPA' },
-        { key: '/clients', icon: <TeamOutlined />, label: 'Clientes y comerciales' },
-        { key: '/tasks', icon: <CheckSquareOutlined />, label: 'Tareas' },
-        { key: '/time', icon: <ClockCircleOutlined />, label: 'Registro de tiempo' }
-      ] };
-    }
-
-    if (roleCanSeePMO) {
-      main.splice(1, 0, { type: 'group', label: 'CONTROL', children: [
+      { type: 'group', label: 'CONTROL', children: [
         { key: '/pmo', icon: <FundOutlined />, label: 'Centro PMO' },
         ...(user?.role === 'team_lead' ? [{ key: '/portfolio', icon: <FolderOpenOutlined />, label: 'Cartera de proyectos' }] : []),
         { key: '/billing', icon: <DollarOutlined />, label: 'Finanzas' }
-      ] });
-    }
+      ] },
+      { type: 'group', label: 'RECURSOS', children: [
+        { key: '/support', icon: <CustomerServiceOutlined />, label: 'Soporte' },
+        { key: '/files', icon: <FileOutlined />, label: 'Documentos' },
+        { key: '/ideas', icon: <BulbOutlined />, label: 'Ideas' }
+      ] }
+    ];
 
     if (user?.role === 'team_lead') {
       main.push({ type: 'group', label: 'ADMINISTRACIÓN', children: [
@@ -251,6 +330,42 @@ export const AppLayout: React.FC = () => {
             <Typography.Title level={4}>{page.title}</Typography.Title>
           </div>
           <div className="app-header-actions">
+            {activeTimer && (
+              <Tag
+                color="success"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '2px 10px',
+                  cursor: 'pointer',
+                  marginInlineEnd: 0
+                }}
+                onClick={() => navigate('/time')}
+              >
+                <PlayCircleOutlined spin />
+                <Text strong style={{ fontFamily: 'monospace' }}>
+                  {formatTimerHHMMSS(elapsedSeconds)}
+                </Text>
+                {!isMobile && (
+                  <Text ellipsis style={{ maxWidth: 140 }}>
+                    {activeTimer.project_name || `Proyecto #${activeTimer.project_id}`}
+                  </Text>
+                )}
+                <Tooltip title="Detener cronómetro y guardar horas">
+                  <Button
+                    type="primary"
+                    danger
+                    size="small"
+                    icon={<PauseCircleOutlined />}
+                    loading={stoppingTimer}
+                    onClick={handleStopGlobalTimer}
+                  >
+                    {!isMobile ? 'Detener' : ''}
+                  </Button>
+                </Tooltip>
+              </Tag>
+            )}
             <PaletteSelector />
             <ThemeSelector />
             <div className={`app-search-slot${mobileSearchOpen ? ' is-mobile-open' : ''}`}><GlobalSearch /></div>

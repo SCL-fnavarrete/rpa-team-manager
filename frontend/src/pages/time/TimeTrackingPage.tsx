@@ -17,6 +17,7 @@ import {
   Popconfirm,
   Alert,
   Checkbox,
+  Tooltip,
   theme
 } from 'antd';
 import {
@@ -25,6 +26,7 @@ import {
   ClockCircleOutlined,
   PlusOutlined,
   DeleteOutlined,
+  CopyOutlined,
   LeftOutlined,
   RightOutlined,
   SendOutlined
@@ -151,6 +153,78 @@ const WeekGrid: React.FC<{
     });
   };
 
+  const repeatEntryMonToFri = (sourceEntry: SaveWeekEntryInput) => {
+    if (isLocked || !week?.days) return;
+    const workdays = week.days.slice(0, 5); // Lunes a Viernes
+    setDraftByDay((prev) => {
+      const next = { ...prev };
+      workdays.forEach((d) => {
+        const currentRows = [...(next[d.date] || [])];
+        const exists = currentRows.some(
+          (r) => r.project_id === sourceEntry.project_id && (r.task_id ?? null) === (sourceEntry.task_id ?? null)
+        );
+        if (!exists) {
+          currentRows.push({
+            project_id: sourceEntry.project_id,
+            task_id: sourceEntry.task_id ?? null,
+            date: d.date,
+            hours: sourceEntry.hours || 1,
+            is_billable: sourceEntry.is_billable !== false,
+            description: sourceEntry.description || ''
+          });
+        }
+        next[d.date] = currentRows;
+      });
+      return next;
+    });
+    message.success('Registro replicado de Lunes a Viernes en tu borrador');
+  };
+
+  const handleCopyPreviousWeek = async () => {
+    if (isLocked || !week?.days) return;
+    try {
+      const prevStart = mondayOf(dayjs(weekStart).subtract(7, 'day'));
+      const prevWeek: TimesheetWeek = await apiService.getTimesheetWeek(prevStart);
+      if (!prevWeek?.days || prevWeek.days.every((d) => !d.entries?.length)) {
+        message.info('La semana anterior no tiene registros para copiar');
+        return;
+      }
+      const nextDraft = { ...draftByDay };
+      let copiedCount = 0;
+      week.days.forEach((currDay, dayIndex) => {
+        const prevDay = prevWeek.days[dayIndex];
+        if (!prevDay?.entries?.length) return;
+        const currRows = [...(nextDraft[currDay.date] || [])];
+        prevDay.entries.forEach((pe) => {
+          if (pe.project_id) ensureProjectTasks(pe.project_id);
+          const exists = currRows.some(
+            (r) => r.project_id === pe.project_id && (r.task_id ?? null) === (pe.task_id ?? null)
+          );
+          if (!exists) {
+            currRows.push({
+              project_id: pe.project_id,
+              task_id: pe.task_id ?? null,
+              date: currDay.date,
+              hours: pe.hours || 1,
+              is_billable: pe.is_billable !== false,
+              description: pe.description || ''
+            });
+            copiedCount += 1;
+          }
+        });
+        nextDraft[currDay.date] = currRows;
+      });
+      setDraftByDay(nextDraft);
+      if (copiedCount > 0) {
+        message.success(`Se copiaron ${copiedCount} registro(s) de la semana anterior`);
+      } else {
+        message.info('Los proyectos y tareas de la semana anterior ya están en esta semana');
+      }
+    } catch {
+      message.error('No se pudo copiar la semana anterior');
+    }
+  };
+
   const handleSave = async (): Promise<boolean> => {
     try {
       setSaving(true);
@@ -187,10 +261,17 @@ const WeekGrid: React.FC<{
   return (
     <div>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
-        <Space>
+        <Space wrap>
           <Button aria-label="Semana anterior" icon={<LeftOutlined />} onClick={() => setWeekStart(mondayOf(dayjs(weekStart).subtract(7, 'day')))} />
           <Text strong>Semana del {dayjs(weekStart).format('DD/MM/YYYY')}</Text>
           <Button aria-label="Semana siguiente" icon={<RightOutlined />} onClick={() => setWeekStart(mondayOf(dayjs(weekStart).add(7, 'day')))} />
+          {!isLocked && (
+            <Tooltip title="Copia en 1 clic los proyectos y tareas registrados en la semana anterior">
+              <Button size="small" icon={<CopyOutlined />} onClick={() => void handleCopyPreviousWeek()}>
+                Copiar semana anterior
+              </Button>
+            </Tooltip>
+          )}
         </Space>
         <Space>
           <Statistic title="Total de la semana" value={weekTotal} suffix="h" precision={2} />
@@ -266,15 +347,27 @@ const WeekGrid: React.FC<{
                       </Checkbox>
                     </Col>
                     <Col span={3} style={{ textAlign: 'right' }}>
-                      <Button
-                        size="small"
-                        type="text"
-                        aria-label={`Eliminar registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
-                        danger
-                        icon={<DeleteOutlined />}
-                        disabled={isLocked}
-                        onClick={() => removeRow(day.date, idx)}
-                      />
+                      <Space size={0}>
+                        <Tooltip title="Repetir este proyecto y tarea de Lunes a Viernes">
+                          <Button
+                            size="small"
+                            type="text"
+                            aria-label={`Repetir de Lunes a Viernes registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                            icon={<CopyOutlined />}
+                            disabled={isLocked}
+                            onClick={() => repeatEntryMonToFri(entry)}
+                          />
+                        </Tooltip>
+                        <Button
+                          size="small"
+                          type="text"
+                          aria-label={`Eliminar registro ${idx + 1}, ${dayjs(day.date).locale('es').format('dddd DD/MM')}`}
+                          danger
+                          icon={<DeleteOutlined />}
+                          disabled={isLocked}
+                          onClick={() => removeRow(day.date, idx)}
+                        />
+                      </Space>
                     </Col>
                   </Row>
                   <Row gutter={4} style={{ marginTop: 4 }} align="middle">
@@ -425,7 +518,15 @@ export const TimeTrackingPage: React.FC = () => {
     loadActiveTimer();
     loadReminders();
     const interval = setInterval(loadActiveTimer, 5000);
-    return () => clearInterval(interval);
+    const onGlobalTimerChange = () => {
+      void loadActiveTimer();
+      setGridRefreshSignal(s => s + 1);
+    };
+    window.addEventListener('rpa-timer-updated', onGlobalTimerChange);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('rpa-timer-updated', onGlobalTimerChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -455,6 +556,7 @@ export const TimeTrackingPage: React.FC = () => {
       setActiveTimer(response);
       setTimerDescription('');
       setGridRefreshSignal(s => s + 1);
+      window.dispatchEvent(new CustomEvent('rpa-timer-updated'));
     } catch (error: any) {
       message.error(error.response?.data?.error || "Error al iniciar el cronómetro");
     } finally {
@@ -469,6 +571,7 @@ export const TimeTrackingPage: React.FC = () => {
       setActiveTimer(null);
       setGridRefreshSignal(s => s + 1);
       message.success("Cronómetro detenido");
+      window.dispatchEvent(new CustomEvent('rpa-timer-updated'));
     } catch (error: any) {
       message.error(error.response?.data?.error || "Error al detener el cronómetro");
     } finally {

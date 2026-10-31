@@ -224,6 +224,23 @@ export const TasksPage: React.FC = () => {
     }
   }, [viewMode]);
 
+  const handleInlineMyTaskStatusChange = async (taskId: number, newStatus: string) => {
+    try {
+      await apiService.put(`/tasks/${taskId}`, { status: newStatus });
+      message.success('Estado de tarea actualizado');
+      setMyTasks((prev) =>
+        newStatus === 'done'
+          ? prev.filter((t) => t.id !== taskId)
+          : prev.map((t) => (t.id === taskId ? { ...t, status: newStatus as Task['status'] } : t))
+      );
+      if (selectedBoard) {
+        loadBoards();
+      }
+    } catch {
+      message.error('No se pudo actualizar el estado de la tarea');
+    }
+  };
+
   const handleStartTaskTimer = async (task: { id: number; title: string; project_id?: number }) => {
     const projectId = task.project_id || selectedProject || selectedBoard?.project_id;
     if (!projectId) {
@@ -238,6 +255,7 @@ export const TasksPage: React.FC = () => {
           description: task.title
         });
         message.success(`Cronómetro iniciado en "${task.title}"`);
+        window.dispatchEvent(new CustomEvent('rpa-timer-updated'));
       } else {
         navigate(`/time?project_id=${projectId}&task_id=${task.id}`);
       }
@@ -962,6 +980,27 @@ export const TasksPage: React.FC = () => {
                   <Tag color={getPriorityColor(p)}>
                     {{ critical: 'Crítica', high: 'Alta', medium: 'Media', low: 'Baja' }[p] || p}
                   </Tag>
+                )
+              },
+              {
+                title: 'Estado (1-clic)',
+                dataIndex: 'status',
+                width: 165,
+                render: (st: Task['status'], r: any) => (
+                  <Select
+                    size="small"
+                    style={{ width: 150 }}
+                    value={st}
+                    onChange={(newStatus) => void handleInlineMyTaskStatusChange(r.id, newStatus)}
+                    options={[
+                      { value: 'todo', label: 'Por Hacer' },
+                      { value: 'in_progress', label: 'En Progreso' },
+                      { value: 'review', label: 'En Revisión' },
+                      { value: 'testing', label: 'En Pruebas' },
+                      { value: 'blocked', label: 'Bloqueado' },
+                      { value: 'done', label: 'Completada ✓' }
+                    ]}
+                  />
                 )
               },
               {
