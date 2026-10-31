@@ -30,6 +30,7 @@ export interface TimesheetPeriod {
   rejection_reason: string | null;
   user_name?: string;
   total_hours?: number;
+  entries?: TimeEntryRow[];
 }
 
 export interface TimesheetWeek {

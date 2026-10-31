@@ -9,6 +9,7 @@ router.use(authenticate);
 
 // PM-level roles: manage phases, delays and scope changes
 const pmWriteRoles = authorize(['team_lead', 'rpa_operations']);
+const activityWriteRoles = authorize(['team_lead', 'rpa_operations', 'rpa_developer']);
 // Financial/scope decisions: highest bar
 const approvalRoles = authorize(['team_lead']);
 
@@ -34,8 +35,8 @@ router.delete('/phases/:phaseId', pmWriteRoles, lifecycleController.deleteProjec
 // PHASE ACTIVITIES
 // ========================================
 router.get('/phases/:phaseId/activities', lifecycleController.getPhaseActivities);
-router.post('/phases/:phaseId/activities', pmWriteRoles, lifecycleController.createPhaseActivity);
-router.put('/activities/:activityId', pmWriteRoles, lifecycleController.updatePhaseActivity);
+router.post('/phases/:phaseId/activities', activityWriteRoles, lifecycleController.createPhaseActivity);
+router.put('/activities/:activityId', activityWriteRoles, lifecycleController.updatePhaseActivity);
 router.delete('/activities/:activityId', pmWriteRoles, lifecycleController.deletePhaseActivity);
 
 // ========================================

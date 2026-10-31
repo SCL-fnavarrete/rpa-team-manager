@@ -145,17 +145,24 @@ describe('Conversión del cotizador a proyecto: cifras en pesos y versión 1 de 
             });
         });
 
-        it('quien no es team_lead no ve montos ni costos de la versión (igual que con las versiones manuales)', async () => {
+        it('rpa_operations ve el monto comercial de la versión pero no el costo interno ni el margen; otros roles tampoco ven montos', async () => {
             const created = await createScoping(lead, 'UF');
+            const row = await scopingRow(created.id);
             const projectId = await convert(ops, created.id);
 
-            const res = await call(ops, 'get', `/api/commercial/projects/${projectId}/quotes`);
+            const resOps = await call(ops, 'get', `/api/commercial/projects/${projectId}/quotes`);
 
-            expect(res.status).toBe(200);
-            expect(res.body.data).toHaveLength(1);
-            for (const field of ['amount', 'estimated_cost', 'margin_percent']) {
-                expect(res.body.data[0]).not.toHaveProperty(field);
+            expect(resOps.status).toBe(200);
+            expect(resOps.body.data).toHaveLength(1);
+            expect(resOps.body.data[0].amount).toBe(row.proposed_price);
+            for (const field of ['estimated_cost', 'margin_percent']) {
+                expect(resOps.body.data[0]).not.toHaveProperty(field);
             }
+
+            const milestones = await testDb.query('SELECT * FROM project_milestones WHERE project_id = ? ORDER BY id ASC', [projectId]);
+            expect(milestones).toHaveLength(5);
+            expect(milestones[0].milestone_type).toBe('checkpoint');
+            expect(milestones[4].milestone_type).toBe('go_live');
         });
 
         it.each(['UF', 'USD'] as const)('convertir → aprobar la versión 1 → OK del cliente deja finanzas y cartera coherentes en pesos (%s)', async (currency) => {

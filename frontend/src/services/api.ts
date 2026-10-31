@@ -601,6 +601,17 @@ class ApiService {
     return response.data;
   }
 
+  async transitionProjectToSupport(projectId: number, payload?: {
+    company_name?: string;
+    contracted_hours_monthly?: number;
+    hourly_rate?: number;
+    hourly_rate_currency?: string;
+    hourly_rate_extra?: number;
+  }): Promise<any> {
+    const response = await this.api.post(`/commercial/projects/${projectId}/transition-to-support`, payload || {});
+    return response.data?.data || response.data;
+  }
+
   // Timesheet endpoints (Fase 3 - Tiempo confiable y efectividad)
   async getTimesheetWeek(weekStart: string): Promise<any> {
     const response = await this.api.get(`/timesheet/week?week_start=${weekStart}`);

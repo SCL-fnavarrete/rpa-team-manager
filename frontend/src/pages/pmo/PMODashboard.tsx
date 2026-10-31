@@ -727,16 +727,58 @@ export const PMODashboard: React.FC<PMODashboardProps> = ({ ganttMode = false })
 
   const handleCreateTask = async (values: any) => {
     try {
-      // For now just show success message since we don't have task creation API
+      if (!selectedProjectId) {
+        message.warning('Selecciona un proyecto antes de crear una tarea');
+        return;
+      }
+      const startStr = values.start_date ? values.start_date.format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD');
+      const dueStr = values.due_date ? values.due_date.format('YYYY-MM-DD') : startStr;
+
+      const boards = await apiService.getTaskBoards(selectedProjectId).catch(() => []);
+      if (Array.isArray(boards) && boards.length > 0) {
+        const boardDetail = await apiService.getTaskBoard(boards[0].id);
+        const firstColumnId = boardDetail?.columns?.[0]?.id;
+        if (firstColumnId) {
+          await apiService.createTask({
+            board_id: boardDetail.id,
+            column_id: firstColumnId,
+            title: values.title,
+            description: values.description,
+            task_type: 'task',
+            status: values.status || 'todo',
+            priority: values.priority || 'medium',
+            assignee_ids: Array.isArray(values.assignee_ids) ? values.assignee_ids : [],
+            estimated_hours: values.estimated_hours ? Number(values.estimated_hours) : undefined,
+            start_date: startStr,
+            due_date: dueStr
+          });
+        } else {
+          await apiService.createMilestone({
+            project_id: selectedProjectId,
+            name: values.title,
+            description: values.description,
+            planned_date: startStr,
+            end_date: dueStr,
+            priority: values.priority || 'medium',
+            responsible_user_id: Array.isArray(values.assignee_ids) ? values.assignee_ids[0] : undefined
+          });
+        }
+      } else {
+        await apiService.createMilestone({
+          project_id: selectedProjectId,
+          name: values.title,
+          description: values.description,
+          planned_date: startStr,
+          end_date: dueStr,
+          priority: values.priority || 'medium',
+          responsible_user_id: Array.isArray(values.assignee_ids) ? values.assignee_ids[0] : undefined
+        });
+      }
+
       message.success(`Nueva tarea creada: ${values.title}`);
-      console.log('Task creation would send:', {
-        ...values,
-        start_date: values.start_date ? values.start_date.format('YYYY-MM-DD') : null,
-        due_date: values.due_date ? values.due_date.format('YYYY-MM-DD') : null
-      });
       setTaskModalVisible(false);
       taskForm.resetFields();
-      // Reload gantt data
+      loadDashboardData();
       if (selectedProjectId) {
         loadGanttData(selectedProjectId, true);
       }

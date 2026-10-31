@@ -25,5 +25,6 @@ router.post('/projects/:projectId/capacity', commercialController.saveCapacity);
 router.delete('/projects/:projectId/capacity/:userId', commercialController.deleteCapacity);
 router.get('/team-capacity', commercialController.getTeamCapacity);
 router.get('/projects/:projectId/quote-cost-estimate', authorize(['team_lead']), commercialController.estimateQuoteCost);
+router.post('/projects/:projectId/transition-to-support', commercialController.transitionToSupport);
 
 export default router;

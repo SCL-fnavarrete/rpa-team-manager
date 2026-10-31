@@ -17,6 +17,7 @@ import {
   Alert,
   Breadcrumb,
   Tabs,
+  Segmented,
   App
 } from 'antd';
 import {
@@ -62,7 +63,7 @@ import { ErrorState, LoadingState } from '@/components/common';
 import dayjs from 'dayjs';
 
 const { Title, Text, Paragraph } = Typography;
-const projectTabOrder = ['overview', 'commercial', 'billing', 'pmo', 'milestones-log', 'lifecycle', 'files', 'evidence', 'comments', 'ai-analytics'];
+const projectTabOrder = ['overview', 'commercial', 'execution', 'billing', 'files', 'collaboration'];
 
 export const ProjectDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -74,9 +75,11 @@ export const ProjectDetailPage: React.FC = () => {
   const [health, setHealth] = useState<ProjectHealth | null>(null);
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [closureOpen, setClosureOpen] = useState(false);
-  const initialTab = ['commercial', 'billing', 'lifecycle', 'pmo', 'files'].includes(searchParams.get('tab') || '') ? searchParams.get('tab')! : 'overview';
-  const [activeTab, setActiveTab] = useState(initialTab);
+  const [activeTab, setActiveTab] = useState('overview');
   const [commercialTab, setCommercialTab] = useState('commercial');
+  const [executionSubView, setExecutionSubView] = useState<'lifecycle' | 'milestones-log' | 'pmo'>('lifecycle');
+  const [filesSubTab, setFilesSubTab] = useState<string>('doc_pdd');
+  const [collaborationSubView, setCollaborationSubView] = useState<'comments' | 'ai-analytics'>('comments');
   
   const { getProject } = useProjectStore();
   const { user } = useAuthStore();
@@ -129,7 +132,19 @@ export const ProjectDetailPage: React.FC = () => {
 
   useEffect(() => {
     const requestedTab = searchParams.get('tab');
-    if (requestedTab && ['commercial', 'lifecycle', 'pmo', 'files'].includes(requestedTab)) setActiveTab(requestedTab);
+    if (!requestedTab) return;
+    if (requestedTab === 'lifecycle' || requestedTab === 'milestones-log' || requestedTab === 'pmo') {
+      setActiveTab('execution');
+      setExecutionSubView(requestedTab);
+    } else if (requestedTab === 'evidence') {
+      setActiveTab('files');
+      setFilesSubTab('evidence');
+    } else if (requestedTab === 'comments' || requestedTab === 'ai-analytics') {
+      setActiveTab('collaboration');
+      setCollaborationSubView(requestedTab);
+    } else if (['overview', 'commercial', 'execution', 'billing', 'files', 'collaboration'].includes(requestedTab)) {
+      setActiveTab(requestedTab);
+    }
   }, [searchParams]);
 
 
@@ -498,7 +513,7 @@ export const ProjectDetailPage: React.FC = () => {
                         </Button>
                         <Button 
                           icon={<ProjectOutlined />}
-                          onClick={() => setActiveTab('pmo')}
+                          onClick={() => { setExecutionSubView('pmo'); setActiveTab('execution'); }}
                           block
                         >
                           Ver indicadores PMO
@@ -545,8 +560,55 @@ export const ProjectDetailPage: React.FC = () => {
             },
             {
               key: 'commercial',
-              label: <span><DollarOutlined /> Comercial · Cobranza · Equipo</span>,
+              label: <span><DollarOutlined /> Comercial · Contratos · Equipo</span>,
               children: <ProjectCommercialSection project={project} user={user || undefined} onRefresh={loadProjectData} initialTab={commercialTab} onTabChange={setCommercialTab} />
+            },
+            {
+              key: 'execution',
+              label: (
+                <span>
+                  <RocketOutlined />
+                  Planificación y Ejecución
+                </span>
+              ),
+              children: (
+                <div style={{ padding: '8px 0' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
+                    <Segmented
+                      value={executionSubView}
+                      onChange={(val) => setExecutionSubView(val as 'lifecycle' | 'milestones-log' | 'pmo')}
+                      options={[
+                        { label: 'Ciclo de vida RPA', value: 'lifecycle', icon: <RocketOutlined /> },
+                        { label: 'Hitos y bitácora', value: 'milestones-log', icon: <FundOutlined /> },
+                        { label: 'Indicadores PMO y Gantt', value: 'pmo', icon: <CalendarOutlined /> }
+                      ]}
+                    />
+                    <Button type="default" icon={<ProjectOutlined />} onClick={handleViewAllTasks}>
+                      Ir al Tablero Kanban
+                    </Button>
+                  </div>
+                  {executionSubView === 'lifecycle' && <ProjectLifecyclePage projectId={project.id} />}
+                  {executionSubView === 'milestones-log' && (
+                    <ProjectMilestonesAndLog
+                      projectId={project.id}
+                      canWriteLog={
+                        user?.role === 'team_lead' ||
+                        project.assigned_to === user?.id ||
+                        project.created_by === user?.id
+                      }
+                    />
+                  )}
+                  {executionSubView === 'pmo' && (
+                    <ProjectPMOView
+                      projectId={project.id}
+                      projectName={project.name}
+                      projectStatus={project.status}
+                      startDate={project.start_date}
+                      endDate={project.end_date}
+                    />
+                  )}
+                </div>
+              )
             },
             {
               key: 'billing',
@@ -555,114 +617,69 @@ export const ProjectDetailPage: React.FC = () => {
             },
             {
               key: 'files',
-              label: <span><FolderOutlined /> Documentos</span>,
+              label: <span><FolderOutlined /> Documentos y Evidencias</span>,
               children: (
                 <div style={{ padding: '8px 0' }}>
                   <Tabs
+                    activeKey={filesSubTab}
+                    onChange={setFilesSubTab}
                     items={[
                       { key: 'doc_pdd', label: 'PDD', children: <FileManager entity_type="project" entity_id={project.id} title="PDD" association_type="doc_pdd" multiple maxFiles={20} /> },
                       { key: 'doc_technical', label: 'Documentación técnica', children: <FileManager entity_type="project" entity_id={project.id} title="Documentación técnica" association_type="doc_technical" multiple maxFiles={20} /> },
                       { key: 'doc_contract', label: 'Contrato/OC', children: <FileManager entity_type="project" entity_id={project.id} title="Contrato/OC" association_type="doc_contract" multiple maxFiles={20} /> },
-                      { key: 'doc_other', label: 'Otro', children: <FileManager entity_type="project" entity_id={project.id} title="Otro" association_type="doc_other" multiple maxFiles={20} /> }
+                      { key: 'doc_other', label: 'Otros archivos', children: <FileManager entity_type="project" entity_id={project.id} title="Otro" association_type="doc_other" multiple maxFiles={20} /> },
+                      {
+                        key: 'evidence',
+                        label: <span><PictureOutlined /> Galería de Evidencias</span>,
+                        children: (
+                          <EvidenceGallery
+                            entity_type="project"
+                            entity_id={project.id}
+                            entity_name={project.name}
+                            title={`Evidencias · ${project.name}`}
+                            showUpload={true}
+                            maxImages={100}
+                          />
+                        )
+                      }
                     ]}
                   />
                 </div>
               )
             },
             {
-              key: 'evidence',
-              label: <span><PictureOutlined /> Evidencias</span>,
-              children: (
-                <div style={{ padding: '8px 0' }}>
-                  <EvidenceGallery
-                    entity_type="project"
-                    entity_id={project.id}
-                    entity_name={project.name}
-                    title={`Evidencias · ${project.name}`}
-                    showUpload={true}
-                    maxImages={100}
-                  />
-                </div>
-              )
-            },
-            {
-              key: 'ai-analytics',
-              label: (
-                <span>
-                  <RobotOutlined />
-                  Revisor IA (Skill)
-                </span>
-              ),
-              children: (
-                <ProjectMLAnalytics
-                  projectId={project.id}
-                  projectName={project.name}
-                />
-              )
-            },
-            {
-              key: 'pmo',
-              label: (
-                <span>
-                  <FundOutlined />
-                  Hitos y PMO
-                </span>
-              ),
-              children: (
-                <ProjectPMOView
-                  projectId={project.id}
-                  projectName={project.name}
-                  projectStatus={project.status}
-                  startDate={project.start_date}
-                  endDate={project.end_date}
-                />
-              )
-            },
-            {
-              key: 'milestones-log',
-              label: (
-                <span>
-                  <FundOutlined />
-                  Hitos y bitácora
-                </span>
-              ),
-              children: (
-                <ProjectMilestonesAndLog
-                  projectId={project.id}
-                  canWriteLog={
-                    user?.role === 'team_lead' ||
-                    project.assigned_to === user?.id ||
-                    project.created_by === user?.id
-                  }
-                />
-              )
-            },
-            {
-              key: 'lifecycle',
-              label: (
-                <span>
-                  <RocketOutlined />
-                  Ciclo de vida
-                </span>
-              ),
-              children: (
-                <ProjectLifecyclePage projectId={project.id} />
-              )
-            },
-            {
-              key: 'comments',
+              key: 'collaboration',
               label: (
                 <span>
                   <MessageOutlined />
-                  Comentarios
+                  IA y Colaboración
                 </span>
               ),
               children: (
-                <div style={{ padding: '8px 0', maxWidth: '720px' }}>
-                  <CommentsThread
-                    entityType="project"
-                    entityId={project.id}
-                  />
+                <div style={{ padding: '8px 0' }}>
+                  <div style={{ marginBottom: 16 }}>
+                    <Segmented
+                      value={collaborationSubView}
+                      onChange={(val) => setCollaborationSubView(val as 'comments' | 'ai-analytics')}
+                      options={[
+                        { label: 'Comentarios del proyecto', value: 'comments', icon: <MessageOutlined /> },
+                        { label: 'Revisor IA (Skill)', value: 'ai-analytics', icon: <RobotOutlined /> }
+                      ]}
+                    />
+                  </div>
+                  {collaborationSubView === 'comments' ? (
+                    <div style={{ maxWidth: '720px' }}>
+                      <CommentsThread
+                        entityType="project"
+                        entityId={project.id}
+                      />
+                    </div>
+                  ) : (
+                    <ProjectMLAnalytics
+                      projectId={project.id}
+                      projectName={project.name}
+                    />
+                  )}
                 </div>
               )
             }

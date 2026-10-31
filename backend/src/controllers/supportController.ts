@@ -599,6 +599,7 @@ export class SupportController {
             `);
             const nextId = nextIdResult.next_id;
 
+            const hoursSpent = Math.round(((Number(time_invested_minutes) || 0) / 60.0) * 100) / 100;
             await db.run(`
                 INSERT INTO support_tickets (
                     id, id_ticket, company_id, title, description, priority, status,
@@ -608,9 +609,47 @@ export class SupportController {
                 ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, NULL, ?, datetime('now'), NULL, datetime('now'), ?, ?, ?)
             `, [
                 nextId, finalTicketId, company_id, client_name, description, priority,
-                ticket_type, req.user?.id, (time_invested_minutes || 0) / 60.0,
+                ticket_type, req.user?.id, hoursSpent,
                 attention_method, work_date, completion_date
             ]);
+
+            if (hoursSpent > 0 && hoursSpent <= 24 && req.user?.id) {
+                const linkedProject = await db.get(
+                    `SELECT p.id FROM projects p
+                     LEFT JOIN clients c ON c.id = p.client_id
+                     WHERE LOWER(TRIM(c.name)) = LOWER(TRIM(?))
+                        OR LOWER(TRIM(p.name)) LIKE LOWER(TRIM(?))
+                     ORDER BY p.id DESC LIMIT 1`,
+                    [company.company_name, `%${rpa_process || company.company_name}%`]
+                );
+                if (linkedProject?.id) {
+                    const entryDate = work_date ? String(work_date).slice(0, 10) : new Date().toISOString().slice(0, 10);
+                    const lockedPeriod = await db.get(
+                        `SELECT id FROM timesheet_periods WHERE user_id = ? AND period_start <= ? AND period_end >= ? AND status IN ('submitted', 'approved')`,
+                        [req.user.id, entryDate, entryDate]
+                    );
+                    if (!lockedPeriod) {
+                        const openPeriod = await db.get(
+                            `SELECT id FROM timesheet_periods WHERE user_id = ? AND period_start <= ? AND period_end >= ? AND status = 'open'`,
+                            [req.user.id, entryDate, entryDate]
+                        );
+                        await db.run(
+                            `INSERT INTO time_entries (
+                                user_id, project_id, description, hours, date, is_billable,
+                                approval_status, timesheet_period_id, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, 1, 'draft', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+                            [
+                                req.user.id,
+                                linkedProject.id,
+                                `[Soporte ${finalTicketId} · ${company.company_name}] ${description}`,
+                                hoursSpent,
+                                entryDate,
+                                openPeriod?.id ?? null
+                            ]
+                        );
+                    }
+                }
+            }
 
             // Get the created ticket with company info
             const newTicket = await db.get(`

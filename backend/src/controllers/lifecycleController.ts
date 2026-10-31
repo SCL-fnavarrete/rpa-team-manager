@@ -336,7 +336,7 @@ export const createPhaseActivity = async (req: AuthenticatedRequest, res: Respon
     // The phase and authenticated session are the source of truth for these
     // required foreign keys; the activity form does not submit either value.
     const phase = await db.get(
-      'SELECT project_id FROM project_phases WHERE id = ?',
+      'SELECT project_id, name FROM project_phases WHERE id = ?',
       [phaseId]
     );
     if (!phase) {
@@ -358,6 +358,40 @@ export const createPhaseActivity = async (req: AuthenticatedRequest, res: Respon
       is_internal ? 1 : 0, responsibility, notes, tags, has_evidence ? 1 : 0,
       evidence_description
     ]);
+
+    const hoursLogged = Math.round(((Number(duration_minutes) || 0) / 60) * 100) / 100;
+    if (hoursLogged > 0 && hoursLogged <= 24) {
+      await db.run(
+        `UPDATE project_phases SET actual_hours = COALESCE(actual_hours, 0) + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [hoursLogged, phaseId]
+      );
+      const entryDate = start_datetime ? String(start_datetime).slice(0, 10) : new Date().toISOString().slice(0, 10);
+      const lockedPeriod = await db.get(
+        `SELECT id FROM timesheet_periods WHERE user_id = ? AND period_start <= ? AND period_end >= ? AND status IN ('submitted', 'approved')`,
+        [req.user.id, entryDate, entryDate]
+      );
+      if (!lockedPeriod) {
+        const openPeriod = await db.get(
+          `SELECT id FROM timesheet_periods WHERE user_id = ? AND period_start <= ? AND period_end >= ? AND status = 'open'`,
+          [req.user.id, entryDate, entryDate]
+        );
+        await db.run(
+          `INSERT INTO time_entries (
+            user_id, project_id, description, hours, date, is_billable,
+            approval_status, timesheet_period_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            req.user.id,
+            phase.project_id,
+            `[Ciclo de Vida · ${phase.name}] ${description || activity_type}`,
+            hoursLogged,
+            entryDate,
+            is_billable === false ? 0 : 1,
+            openPeriod?.id ?? null
+          ]
+        );
+      }
+    }
 
     const activity = await db.get(`
       SELECT pa.*, u.full_name as user_full_name

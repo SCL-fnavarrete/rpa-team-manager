@@ -542,6 +542,25 @@ export class ScopingService {
         } else {
           logger.warn(`Plantilla de ciclo de vida "${PHASE_TEMPLATE_NAMES[index]}" no encontrada: la fase ${phase.phase_number} se crea solo como tarea`);
         }
+
+        const milestoneType = index === phases.length - 1 ? 'go_live' : index === 0 ? 'checkpoint' : 'delivery';
+        await db.run(
+          `INSERT INTO project_milestones (
+            project_id, name, description, milestone_type, planned_date, end_date,
+            baseline_planned_date, status, priority, responsible_user_id, responsibility, created_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'medium', ?, 'internal', ?)`,
+          [
+            projectId,
+            `Hito ${phase.phase_number}: ${phase.name}`,
+            phase.description,
+            milestoneType,
+            plannedEnd,
+            plannedEnd,
+            plannedEnd,
+            actor.id,
+            actor.id
+          ]
+        );
       }
 
       // La condición evita que dos conversiones simultáneas dejen dos proyectos para el mismo levantamiento

@@ -142,16 +142,30 @@ const BillingPage: React.FC = () => {
   }, [requestedStatus]);
 
   // Carga los hitos del proyecto (Gantt) para poblar el selector de "hito de proyecto"
-  // cuando el disparador del hito de pago requiere uno (progress_pct / deliverable_approved).
+  // cuando el disparador del hito de pago requiere uno (progress_pct / deliverable_approved)
+  // y pre-selecciona el CECO principal asignado al proyecto si existe.
   useEffect(() => {
     if (createModalOpen && watchedProjectId) {
-      apiService.getProjectGantt(watchedProjectId)
-        .then(res => setProjectMilestones((res.milestones || []).map((m: any) => ({ id: m.id, name: m.name }))))
+      apiService.getProjectGantt?.(watchedProjectId)
+        ?.then(res => setProjectMilestones((res.milestones || []).map((m: any) => ({ id: m.id, name: m.name }))))
         .catch(() => setProjectMilestones([]));
+
+      apiService.getProjectCostCenters?.(watchedProjectId)
+        ?.then(res => {
+          const allocs = res?.allocations || [];
+          if (allocs.length > 0 && !form.getFieldValue('cost_center_id')) {
+            const sorted = [...allocs].sort((a, b) => Number(b.percentage || 0) - Number(a.percentage || 0));
+            form.setFieldsValue({
+              cost_center_id: sorted[0].cost_center_id,
+              currency: res.currency || form.getFieldValue('currency') || 'CLP'
+            });
+          }
+        })
+        .catch(() => {});
     } else {
       setProjectMilestones([]);
     }
-  }, [watchedProjectId, createModalOpen]);
+  }, [watchedProjectId, createModalOpen, form]);
 
   const loadAll = async () => {
     try {
@@ -436,7 +450,12 @@ const BillingPage: React.FC = () => {
               }))}
             />
             <DatePicker.RangePicker value={filters.period as any} onChange={(period) => setFilters((current) => ({ ...current, period: period as [any, any] | null }))} aria-label="Periodo de cobranza" />
-            {canManageBilling && <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>
+            {canManageBilling && <Button type="primary" icon={<PlusOutlined />} onClick={() => {
+              if (projectFilter) {
+                form.setFieldsValue({ project_id: projectFilter });
+              }
+              setCreateModalOpen(true);
+            }}>
               Nuevo hito de pago
             </Button>}
           </Space>

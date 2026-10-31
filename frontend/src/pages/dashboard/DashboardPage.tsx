@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Button, Progress, Skeleton, Space, Table, Tag, Typography } from 'antd';
+import { Button, Card, Progress, Skeleton, Space, Table, Tag, Typography, theme } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -9,6 +9,7 @@ import {
   DollarOutlined,
   ExclamationCircleOutlined,
   FundOutlined,
+  PlayCircleOutlined,
   PlusOutlined,
   ProjectOutlined,
   RiseOutlined,
@@ -26,6 +27,7 @@ const { Title, Text, Paragraph } = Typography;
 type FinancialAlert = { project_name?: string; alert_type?: string; alert_level?: string };
 
 export const DashboardPage: React.FC = () => {
+  const { token } = theme.useToken();
   const { user } = useAuthStore();
   const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[]>([]);
@@ -33,6 +35,10 @@ export const DashboardPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [roiDashboard, setRoiDashboard] = useState<any>(null);
   const [roiLoading, setRoiLoading] = useState(false);
+  const [myTasksCount, setMyTasksCount] = useState<number>(0);
+  const [myWeekHours, setMyWeekHours] = useState<number>(0);
+  const [myWeekStatus, setMyWeekStatus] = useState<string>('draft');
+  const [activeTimerEntry, setActiveTimerEntry] = useState<any>(null);
 
   const loadROIDashboard = useCallback(async () => {
     try {
@@ -45,18 +51,49 @@ export const DashboardPage: React.FC = () => {
     }
   }, []);
 
+  const loadPersonalSummary = useCallback(async () => {
+    try {
+      const d = dayjs();
+      const day = d.day();
+      const diff = day === 0 ? -6 : 1 - day;
+      const weekStart = d.add(diff, 'day').format('YYYY-MM-DD');
+
+      const [tasksRes, weekRes, activeRes] = await Promise.allSettled([
+        apiService.get?.('/tasks/my-tasks?limit=100') ?? Promise.resolve([]),
+        apiService.getTimesheetWeek?.(weekStart) ?? Promise.resolve(null),
+        apiService.get?.('/time-entries/active') ?? Promise.resolve(null)
+      ]);
+
+      if (tasksRes.status === 'fulfilled' && tasksRes.value) {
+        const list = Array.isArray(tasksRes.value) ? tasksRes.value : (tasksRes.value?.data || []);
+        const pending = list.filter((t: any) => t.status !== 'done' && t.status !== 'completed');
+        setMyTasksCount(pending.length);
+      }
+      if (weekRes.status === 'fulfilled' && weekRes.value) {
+        setMyWeekHours(Number(weekRes.value.totals?.total_hours || 0));
+        setMyWeekStatus(weekRes.value.period?.status || 'draft');
+      }
+      if (activeRes.status === 'fulfilled') {
+        setActiveTimerEntry(activeRes.value || null);
+      }
+    } catch {
+      // Non-blocking personal summary
+    }
+  }, []);
+
   const loadDashboardData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       setProjects(await apiService.getProjects());
+      void loadPersonalSummary();
       if (user?.role === 'team_lead') await loadROIDashboard();
     } catch (loadError: any) {
       setError(loadError.response?.data?.error || 'No se pudo cargar el resumen. Intenta nuevamente.');
     } finally {
       setLoading(false);
     }
-  }, [loadROIDashboard, user?.role]);
+  }, [loadPersonalSummary, loadROIDashboard, user?.role]);
 
   useEffect(() => { void loadDashboardData(); }, [loadDashboardData]);
 
@@ -111,6 +148,43 @@ export const DashboardPage: React.FC = () => {
       </section>
 
       {error && <InlineErrorState className="dashboard-error" title="No fue posible actualizar el resumen" description={error} onRetry={() => void loadDashboardData()} />}
+
+      <Card
+        style={{ marginBottom: 20, borderColor: activeTimerEntry ? token.colorSuccess : token.colorBorderSecondary }}
+        styles={{ body: { padding: '16px 20px' } }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 16 }}>
+          <div>
+            <Text className="section-kicker" style={{ display: 'block' }}>MI ESPACIO DE TRABAJO · ESTA SEMANA</Text>
+            <Space size="large" wrap style={{ marginTop: 4 }}>
+              <div>
+                <Text type="secondary">Mis horas esta semana: </Text>
+                <Text strong style={{ fontSize: 16 }}>{myWeekHours.toFixed(1)} / 40 h</Text>{' '}
+                <Tag color={myWeekStatus === 'approved' ? 'green' : myWeekStatus === 'submitted' ? 'blue' : myWeekStatus === 'rejected' ? 'red' : 'default'}>
+                  {myWeekStatus === 'approved' ? 'Aprobada' : myWeekStatus === 'submitted' ? 'Enviada' : myWeekStatus === 'rejected' ? 'Rechazada' : 'Borrador'}
+                </Tag>
+              </div>
+              <div>
+                <Text type="secondary">Mis tareas pendientes: </Text>
+                <Tag color={myTasksCount > 0 ? 'processing' : 'success'}>{myTasksCount} activas</Tag>
+              </div>
+              {activeTimerEntry && (
+                <Tag color="green" icon={<PlayCircleOutlined />}>
+                  Cronómetro en curso: {activeTimerEntry.project_name || `Proyecto #${activeTimerEntry.project_id}`}
+                </Tag>
+              )}
+            </Space>
+          </div>
+          <Space wrap>
+            <Button type="primary" icon={<CheckCircleOutlined />} onClick={() => navigate('/tasks?view=my-tasks')}>
+              Mis Tareas ({myTasksCount})
+            </Button>
+            <Button icon={<ClockCircleOutlined />} onClick={() => navigate('/time')}>
+              {activeTimerEntry ? 'Ver Cronómetro / Horas' : 'Imputar Horas de la Semana'}
+            </Button>
+          </Space>
+        </div>
+      </Card>
 
       <section className="dashboard-overview" aria-label="Indicadores del portafolio">
         <div className="overview-intro"><Text className="section-kicker">PORTAFOLIO</Text><Title level={4}>Panorama general</Title></div>

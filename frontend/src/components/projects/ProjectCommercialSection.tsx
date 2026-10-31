@@ -56,6 +56,9 @@ export const ProjectCommercialSection: React.FC<Props> = ({ project, user, onRef
   const [costCenterModalOpen, setCostCenterModalOpen] = useState(false);
   const [editingAllocations, setEditingAllocations] = useState<ProjectCostCenterAllocation[]>([]);
   const [savingAllocations, setSavingAllocations] = useState(false);
+  const [supportHandoverResult, setSupportHandoverResult] = useState<Row | null>(null);
+  const [transitioningSupport, setTransitioningSupport] = useState(false);
+  const [slaHoursMonthly, setSlaHoursMonthly] = useState<number>(20);
   const isLead = user?.role === 'team_lead';
   const canManage = isLead || user?.role === 'rpa_operations';
   const canViewBilling = isLead || canManage || user?.role === 'billing';
@@ -197,10 +200,29 @@ export const ProjectCommercialSection: React.FC<Props> = ({ project, user, onRef
     if (done) setDocumentType(null);
   };
 
+  const handleTransitionToSupport = async () => {
+    setTransitioningSupport(true);
+    try {
+      const response = await apiService.transitionProjectToSupport(project.id, {
+        contracted_hours_monthly: slaHoursMonthly || 20
+      });
+      const data = response?.data || response;
+      setSupportHandoverResult(data);
+      message.success(response?.message || 'Proyecto traspasado a Soporte y Operación');
+      await load();
+      onRefresh?.();
+    } catch (err: any) {
+      message.error(err?.response?.data?.error || 'No se pudo traspasar el proyecto a soporte');
+    } finally {
+      setTransitioningSupport(false);
+    }
+  };
+
   const quoteColumns: any[] = [
     { title: 'Versión', dataIndex: 'version', render: (v: number) => `v${v}` },
     { title: 'Tipo', dataIndex: 'pricing_model', render: (v: string) => ({ fixed: 'Precio fijo', hourly: 'Por horas', mixed: 'Mixta' }[v] || v) },
-    ...(isLead ? [{ title: 'Monto', dataIndex: 'amount', render: (v: number, row: Row) => `${row.currency} ${Number(v).toLocaleString('es-CL')}` }, { title: 'Margen', dataIndex: 'margin_percent', render: (v: number | null) => v == null ? 'Por definir' : `${Number(v).toFixed(1)}%` }] : []),
+    ...(canManage ? [{ title: 'Monto', dataIndex: 'amount', render: (v: number | null, row: Row) => v == null ? '—' : `${row.currency || 'CLP'} ${Number(v).toLocaleString('es-CL')}` }] : []),
+    ...(isLead ? [{ title: 'Margen', dataIndex: 'margin_percent', render: (v: number | null) => v == null ? 'Por definir' : `${Number(v).toFixed(1)}%` }] : []),
     { title: 'Archivo', dataIndex: 'file_id', render: (v: number | null) => v ? <Space wrap><Button type="link" size="small" onClick={() => setPreviewFileId(v)}>Previsualizar</Button><Button type="link" size="small" onClick={() => void downloadQuoteFile(v)}>Descargar</Button></Space> : 'Sin archivo' },
     { title: 'Estado', dataIndex: 'status', render: (v: string) => <Tag color={v === 'approved' ? 'green' : v === 'replaced' ? 'default' : 'blue'}>{({ sent: 'Enviada', approved: 'Validada por jefatura', replaced: 'Reemplazada', rejected: 'Rechazada', draft: 'Borrador' } as Row)[v] || v}</Tag> },
     { title: 'Registrada', dataIndex: 'created_at', render: (v: string) => v ? dayjs(v).format('DD MMM YYYY') : '—' },
@@ -220,7 +242,7 @@ export const ProjectCommercialSection: React.FC<Props> = ({ project, user, onRef
         {canManage && project.commercial_stage === 'approved' && project.status !== 'active' && project.status !== 'completed' && (
           <Button
             type="primary"
-            style={{ backgroundColor: '#52c41a', borderColor: '#52c41a' }}
+            style={{ backgroundColor: token.colorSuccess, borderColor: token.colorSuccess }}
             icon={<CheckCircleOutlined />}
             onClick={() => modal.confirm({
               title: 'Iniciar ejecución del proyecto',
@@ -432,6 +454,47 @@ export const ProjectCommercialSection: React.FC<Props> = ({ project, user, onRef
         {project.financial_closed_at && <p>Cierre financiero el {dayjs(project.financial_closed_at).format('DD MMM YYYY')}</p>}
       </Card>
     </div>
+    <Card
+      className="commercial-close-card"
+      title="Traspaso a Soporte y Operación (Contrato SLA)"
+      extra={supportHandoverResult ? <Tag color="green">Contrato Activo</Tag> : <Tag color="blue">Post-Go-Live</Tag>}
+      style={{ marginTop: 16 }}
+    >
+      <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
+        Crea o vincula automáticamente al cliente y el proceso RPA en el módulo de Soporte y Operación tras la puesta en producción.
+      </Text>
+      {supportHandoverResult ? (
+        <Alert
+          type="success"
+          showIcon
+          message={`Proceso RPA registrado en Soporte: ${supportHandoverResult?.process?.process_name || project.name}`}
+          description={`Cliente: ${supportHandoverResult?.company?.company_name || project.client_name || project.name} · Bolsa mensual: ${supportHandoverResult?.company?.contracted_hours_monthly || slaHoursMonthly} h/mes.`}
+          action={<Button size="small" type="primary" href="/support">Ir a Soporte</Button>}
+        />
+      ) : (
+        canManage && (
+          <Space wrap align="center">
+            <Text>Horas SLA contratadas/mes:</Text>
+            <InputNumber
+              min={1}
+              max={500}
+              value={slaHoursMonthly}
+              onChange={(val) => setSlaHoursMonthly(Number(val) || 20)}
+              addonAfter="h/mes"
+              style={{ width: 130 }}
+            />
+            <Button
+              type="primary"
+              icon={<CheckCircleOutlined />}
+              loading={transitioningSupport}
+              onClick={() => void handleTransitionToSupport()}
+            >
+              Pasar a Soporte (Crear Contrato SLA)
+            </Button>
+          </Space>
+        )
+      )}
+    </Card>
   </div>;
 
   const handleConfirmCompleteMilestone = async () => {
@@ -690,7 +753,7 @@ export const ProjectCommercialSection: React.FC<Props> = ({ project, user, onRef
         </Space>
         <Space style={{ width: '100%' }} align="start">
         <Form.Item label="Horas estimadas" name="hours"><InputNumber min={0} style={{ width: 190 }} /></Form.Item>
-        <Form.Item label="Costo estimado" name="estimated_cost"><InputNumber min={0} style={{ width: 190 }} /></Form.Item>
+        {isLead && <Form.Item label="Costo estimado (interno)" name="estimated_cost"><InputNumber min={0} style={{ width: 190 }} /></Form.Item>}
         </Space>
         {isLead && <Button style={{ marginBottom: 16 }} onClick={() => void estimateQuoteCost()}>Estimar costo según equipo y horas</Button>}
         <Form.Item label="Cambio de alcance asociado" name="scope_change_id"><Select allowClear placeholder="Solo si esta versión cotiza un cambio" options={scopeChanges.filter((change) => change.requires_re_quote && !change.quote_approved && change.status === 'pending').map((change) => ({ value: change.id, label: change.description }))} /></Form.Item>
